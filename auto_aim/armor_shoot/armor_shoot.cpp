@@ -57,6 +57,33 @@ ArmorShoot::ArmorShoot(const std::string &config_path) : lock_id_(-1), plotter_(
 
 ArmorShoot::~ArmorShoot() {}
 
+double ArmorShoot::continuousYaw(const Eigen::Vector3d &xyz, double gimbal_yaw)
+{
+    const double yaw_raw = std::atan2(xyz.y(), xyz.x()) + yaw_offset_;
+
+    if (!has_yaw_ || std::abs(last_target_yaw_ - gimbal_yaw) > 3.0)
+    {
+        last_target_yaw_ = gimbal_yaw;
+    }
+
+    // 差值归一化到 [-π, π] 后累加，得到连续的目标角度（可超出 ±π）
+    last_target_yaw_ += rm_utils::limit_rad(yaw_raw - last_target_yaw_);
+    has_yaw_ = true;
+    return last_target_yaw_;
+}
+
+SendPacket ArmorShoot::holdPacket(double gimbal_yaw, double gimbal_pitch) const
+{
+    SendPacket p{};    // header / tail 走默认成员初始化器，其余清零
+    p.found       = 1; // 确实识别到了装甲板
+    p.fire_advice = 0; // 但这一帧不给开火建议
+
+    // 开机后还没有过有效值时，交还当前云台姿态 —— 等价于"原地不动"，而不是回零位
+    p.target_yaw   = static_cast<float>(has_yaw_ ? last_target_yaw_ : gimbal_yaw);
+    p.target_pitch = static_cast<float>(has_pitch_ ? last_sent_pitch_ : gimbal_pitch);
+    return p;
+}
+
 SendPacket ArmorShoot::shoot(const std::optional<Target> &target, std::chrono::steady_clock::time_point timestamp,
                              const Eigen::Matrix3d &R_gimbal2world, const cv::Mat &bgr_img, const std::string &window_name)
 {
@@ -89,8 +116,10 @@ SendPacket ArmorShoot::shoot(const std::optional<Target> &target, std::chrono::s
 
     if (!aim_point.valid)
     {
-        if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, 0.0f, 0.0f, 0, bgr_img, window_name);
-        return {};
+        // 连瞄准点都选不出来，yaw 无从更新，全部沿用上一次
+        const SendPacket hold = holdPacket(gimbal_yaw, gimbal_pitch);
+        if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, hold.target_yaw, hold.target_pitch, 0, bgr_img, window_name);
+        return hold;
     }
 
     // 计算初始弹道
@@ -100,9 +129,12 @@ SendPacket ArmorShoot::shoot(const std::optional<Target> &target, std::chrono::s
 
     if (trajectory0.unsolvable)
     {
+        // 瞄准点有效，yaw 可以继续跟；只有 pitch 因弹道无解而冻结
+        continuousYaw(xyz0, gimbal_yaw);
         debug_aim_point.valid = false;
-        if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, 0.0f, 0.0f, 0, bgr_img, window_name);
-        return {};
+        const SendPacket hold = holdPacket(gimbal_yaw, gimbal_pitch);
+        if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, hold.target_yaw, hold.target_pitch, 0, bgr_img, window_name);
+        return hold;
     }
 
     // 迭代求解飞行时间 (最多 10 次，收敛条件：相邻两次 fly_time 差 < 0.001)
@@ -122,8 +154,10 @@ SendPacket ArmorShoot::shoot(const std::optional<Target> &target, std::chrono::s
 
         if (!aim_point_iter.valid)
         {
-            if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, 0.0f, 0.0f, 0, bgr_img, window_name);
-            return {};
+            // 迭代中选不出瞄准点，同上：yaw 无从更新，全部沿用
+            const SendPacket hold = holdPacket(gimbal_yaw, gimbal_pitch);
+            if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, hold.target_yaw, hold.target_pitch, 0, bgr_img, window_name);
+            return hold;
         }
 
         // 计算新弹道
@@ -135,9 +169,12 @@ SendPacket ArmorShoot::shoot(const std::optional<Target> &target, std::chrono::s
         if (current_traj.unsolvable)
         {
             MAS_LOG_DEBUG("Unsolvable trajectory in iter {}: speed={:.2f}, d={:.2f}, z={:.2f}", iter + 1, bullet_speed_, d, xyz.z());
+            // 瞄准点有效，yaw 继续跟；pitch 冻结
+            continuousYaw(xyz, gimbal_yaw);
             debug_aim_point.valid = false;
-            if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, 0.0f, 0.0f, 0, bgr_img, window_name);
-            return {};
+            const SendPacket hold = holdPacket(gimbal_yaw, gimbal_pitch);
+            if (debug_) showDebug(target, {false, {}}, gimbal_yaw, gimbal_pitch, hold.target_yaw, hold.target_pitch, 0, bgr_img, window_name);
+            return hold;
         }
 
         // 检查收敛条件
@@ -149,23 +186,23 @@ SendPacket ArmorShoot::shoot(const std::optional<Target> &target, std::chrono::s
         prev_fly_time = current_traj.fly_time;
     }
 
-    // 计算最终角度
+    // 计算最终角度。yaw 只依赖几何，先算出来 —— 即使下面弹道无解它也是有效的
     Eigen::Vector3d final_xyz = debug_aim_point.xyza.head(3);
-    double          yaw_raw   = std::atan2(final_xyz.y(), final_xyz.x()) + yaw_offset_;
-    // 初始化：如果是第一次运行，或者相差太离谱，用当前云台角度初始化基准，这里的 3.0 (弧度) 是一个阈值，约 171 度，防止刚启动时转一大圈
-    if (std::abs(last_target_yaw_ - gimbal_yaw) > 3.0) {
-        last_target_yaw_ = gimbal_yaw;
-    }
-    // 计算原始目标角度与上一次目标角度的差值
-    double yaw_delta = yaw_raw - last_target_yaw_;
-    // 将差值归一化到 [-π, π] 范围内
-    yaw_delta = rm_utils::limit_rad(yaw_delta);
-    // 基于上一次目标角度 + 归一化差值，得到连续的目标角度
-    double yaw = last_target_yaw_ + yaw_delta;
-    // 更新状态变量
-    last_target_yaw_ = yaw;
+    const double    yaw       = continuousYaw(final_xyz, gimbal_yaw);
 
-    double pitch = -(rm_utils::Trajectory(bullet_speed_, final_xyz.head<2>().norm(), final_xyz.z()).pitch + pitch_offset_);
+    const rm_utils::Trajectory final_trajectory(bullet_speed_, final_xyz.head<2>().norm(), final_xyz.z());
+    if (final_trajectory.unsolvable)
+    {
+        // yaw 已经跟上了，pitch 冻结在上一次有效值
+        const SendPacket hold = holdPacket(gimbal_yaw, gimbal_pitch);
+        if (debug_) showDebug(target, debug_aim_point, gimbal_yaw, gimbal_pitch, hold.target_yaw, hold.target_pitch, 0, bgr_img, window_name);
+        return hold;
+    }
+    const double pitch = -(final_trajectory.pitch + pitch_offset_);
+
+    // 本帧弹道有解，记下 pitch 供后续保持状态使用
+    last_sent_pitch_ = pitch;
+    has_pitch_       = true;
 
     float dist = static_cast<float>(final_xyz.head<2>().norm());
 

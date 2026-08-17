@@ -1,10 +1,23 @@
 #include "hikcamera.hpp"
 
+#include <opencv2/core/utility.hpp>
+#include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <chrono>
 #include <thread>
 
 #include "mas_log.hpp"
+
+/*
+    主机与 MCU 两套独立时钟，
+    图像、姿态各自携带的时间戳存在传输延迟与随机抖动，
+    静态误差均值抵消看着准，云台转动时抖动叠加导致瞄准偏移；·
+    单纯姿态插值无法根治。需要要对齐两套时钟，或者在云台转动时使用图像时间戳作为姿态插值的参考时间戳。（目前仅手动减小误差）
+    准确的方案需要搭配 strobe 并以MCU的始终为准
+    当前方案实际公式  t_曝光中点 = t_recv − (实际曝光/2 + 传输延迟)
+
+    transfer_latency_ms_ 由 `./base calibrate_latency` 标定
+*/
 
 // 采集线程：持续抓帧、转换、推入队列，并更新心跳时间戳。
 void hikcamera::HikCamera::captureLoop()
@@ -12,8 +25,9 @@ void hikcamera::HikCamera::captureLoop()
     while (running_.load(std::memory_order_relaxed))
     {
         CameraFrame data;
-        bool connected = false;
-        bool got_frame = false;
+        bool     connected = false;
+        bool     got_frame = false;
+        uint32_t frame_num = 0;
 
         {
             std::unique_lock<std::timed_mutex> lock(camera_mutex_, std::chrono::milliseconds(kCameraFastLockTimeoutMs));
@@ -26,7 +40,14 @@ void hikcamera::HikCamera::captureLoop()
                     int nRet = MV_CC_GetImageBuffer(handle, &stOutFrame, kGetImageBufferTimeoutMs);
                     if (nRet == MV_OK)
                     {
-                        data.timestamp = std::chrono::steady_clock::now();
+                        auto t_recv    = std::chrono::steady_clock::now();
+                        auto offset    = std::chrono::microseconds(static_cast<int64_t>(
+                                                                exposure_actual_us_ / 2.0 + transfer_latency_ms_ * 1000.0));
+                        data.t_recv    = t_recv;
+                        data.timestamp = t_recv - offset;
+
+                        frame_num = stOutFrame.stFrameInfo.nFrameNum;
+
                         data.frame     = processFrame(&stOutFrame);
                         MV_CC_FreeImageBuffer(handle, &stOutFrame);
                         got_frame = true;
@@ -63,12 +84,56 @@ void hikcamera::HikCamera::captureLoop()
         {
             last_frame_tick_ms_.store(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    data.timestamp.time_since_epoch()).count(),
+                    data.t_recv.time_since_epoch()).count(),
                 std::memory_order_relaxed);
-            
+
             pushFrame(std::move(data));
+            updateDropStats(frame_num);
         }
     }
+}
+
+// 丢帧统计
+void hikcamera::HikCamera::updateDropStats(uint32_t frame_num)
+{
+    if (stats_reset_pending_.exchange(false, std::memory_order_relaxed))
+    {
+        last_frame_num_ = 0;
+    }
+
+    if (last_frame_num_ != 0)
+    {
+        const uint32_t gap = frame_num - last_frame_num_ - 1;
+        if (gap > 0 && gap < kFrameGapSanityLimit)
+        {
+            dropped_total_ += gap;
+        }
+        else if (gap >= kFrameGapSanityLimit)
+        {
+            MAS_LOG_WARN("Implausible frame number step {} -> {}, ignored", last_frame_num_, frame_num);
+        }
+    }
+    last_frame_num_ = frame_num;
+
+    const uint64_t new_grab  = dropped_total_ - last_dropped_grab_;
+    const uint64_t new_queue = queue_dropped_total_ - last_dropped_queue_;
+    if (new_grab == 0 && new_queue == 0)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_drop_log_time_ < std::chrono::milliseconds(kDropLogThrottleMs))
+    {
+        return;
+    }
+
+    MAS_LOG_WARN("Frame drop: grab +{} (total {}), queue +{} (total {})",
+                 new_grab, dropped_total_, new_queue, queue_dropped_total_);
+
+    last_dropped_grab_    = dropped_total_;
+    last_dropped_queue_   = queue_dropped_total_;
+    last_drop_log_time_   = now;
 }
 
 void hikcamera::HikCamera::pushFrame(CameraFrame &&frame)
@@ -78,6 +143,7 @@ void hikcamera::HikCamera::pushFrame(CameraFrame &&frame)
         if (frame_queue_.size() >= kQueueCapacity)
         {
             frame_queue_.pop(); // 丢弃最旧帧，保持"只要最新图像"的语义
+            ++queue_dropped_total_;
         }
         frame_queue_.push(std::move(frame));
     }

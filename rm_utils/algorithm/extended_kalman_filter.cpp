@@ -43,6 +43,7 @@ Eigen::VectorXd ExtendedKalmanFilter::update(const Eigen::VectorXd &z, const Eig
                                              std::function<Eigen::VectorXd(const Eigen::VectorXd &, const Eigen::VectorXd &)> z_subtract)
 {
     Eigen::VectorXd x_prior = x;
+    Eigen::MatrixXd P_prior = P;
     Eigen::MatrixXd K       = P * H.transpose() * (H * P * H.transpose() + R).inverse();
 
     // Stable Compution of the Posterior Covariance
@@ -52,15 +53,15 @@ Eigen::VectorXd ExtendedKalmanFilter::update(const Eigen::VectorXd &z, const Eig
     x = x_add(x, K * z_subtract(z, h(x)));
 
     /// 卡方检验
-    Eigen::VectorXd residual = z_subtract(z, h(x));
+    Eigen::VectorXd residual = z_subtract(z, h(x_prior));
     // 新增检验
-    Eigen::MatrixXd S    = H * P * H.transpose() + R;
+    Eigen::MatrixXd S    = H * P_prior * H.transpose() + R;
     double          nis  = residual.transpose() * S.inverse() * residual;
     double          nees = (x - x_prior).transpose() * P.inverse() * (x - x_prior);
 
     // 卡方检验阈值（自由度=4，取置信水平95%）
-    constexpr double nis_threshold  = 0.711;
-    constexpr double nees_threshold = 0.711;
+    constexpr double nis_threshold  = 9.488;
+    constexpr double nees_threshold = 19.68;
 
     if (nis > nis_threshold) nis_count_++, data["nis_fail"] = 1;
     if (nees > nees_threshold) nees_count_++, data["nees_fail"] = 1;

@@ -63,10 +63,12 @@ struct SDLContext
 {
     SDL_Window                         *window   = nullptr;
     SDL_Renderer                       *renderer = nullptr;
-    SDL_Texture                        *texture  = nullptr;
+    SDL_Texture                        *texture  = nullptr; // 存储图像原图
     std::unordered_map<int, TTF_Font *> fonts; // 按字号缓存字体
-    int                                 width  = 0;
+    int                                 width  = 0; // 窗口
     int                                 height = 0;
+    int                                 tex_w  = 0; // 纹理（原图）尺寸
+    int                                 tex_h  = 0;
     bool                                closed = false; // 窗口是否已关闭
 
     // 文本纹理缓存

@@ -69,6 +69,21 @@ class ArmorShoot
      */
     AimPoint chooseAimPoint(const Target &target);
 
+    /**
+     * @brief 由瞄准点算出连续化的目标 yaw，并更新 last_target_yaw_
+     * @details yaw 只依赖几何（atan2），不依赖弹道解算。所以弹道无解时它仍然有效，
+     *          云台可以继续对准目标方向。调用一次即把 has_yaw_ 置真。
+     */
+    double continuousYaw(const Eigen::Vector3d &xyz, double gimbal_yaw);
+
+    /**
+     * @brief 保持指令：识别到装甲板但这一帧算不出完整指令时使用
+     * @details yaw 用 last_target_yaw_（若本帧能算，调用前先调 continuousYaw 更新它）；
+     *          pitch 冻结在上一次有效值。开机后尚无有效值时交还当前云台姿态（原地不动）。
+     *          found=1（确实识别到了）、fire_advice=0（不开火）。
+     */
+    SendPacket holdPacket(double gimbal_yaw, double gimbal_pitch) const;
+
     void showDebug(const std::optional<Target> &target, const AimPoint &aim_point, double gimbal_yaw, double gimbal_pitch, float target_yaw,
                    float target_pitch, uint8_t fire, const cv::Mat &bgr_img, const std::string &window_name) const noexcept;
 
@@ -95,7 +110,10 @@ class ArmorShoot
 
     std::unique_ptr<rm_utils::Plotter> plotter_; ///< plotter 实例
 
-    double last_target_yaw_ = 0.0; // 记录上一次的目标yaw
+    double last_target_yaw_ = 0.0;   // 连续化后的目标 yaw（跨帧累加，可超出 ±π）
+    double last_sent_pitch_ = 0.0;   // 上一次弹道有解时发出的 pitch，保持状态下冻结用
+    bool   has_yaw_         = false; // last_target_yaw_ 是否已被有效赋值过
+    bool   has_pitch_       = false; // last_sent_pitch_ 是否已被有效赋值过
 
     mutable std::map<std::string, double>                                fps_map_;       ///< FPS 统计
     mutable std::map<std::string, int>                                   count_map_;     ///< 帧计数

@@ -114,13 +114,11 @@ void hikcamera::HikCamera::TryConnect(bool bypass_backoff)
     if (success)
     {
         reconnect_backoff_ms_ = kInitialBackoffMs;
-        fail_count_ = 0;
         MAS_LOG_INFO("Camera reconnect successfully");
     }
     else
     {
         reconnect_backoff_ms_ = std::min(reconnect_backoff_ms_ * 2, kMaxBackoffMs);
-        fail_count_ = 0;
 
         //限制日志打印频率，避免刷屏
         auto since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fail_log_time_).count();

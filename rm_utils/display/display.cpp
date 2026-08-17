@@ -225,11 +225,14 @@ void Display::display_thread_func()
             }
 
             // 创建或更新纹理
-            if (!ctx.texture || (ctx.width != task.image.cols || ctx.height != task.image.rows))
+            if (!ctx.texture || (ctx.tex_w != task.image.cols || ctx.tex_h != task.image.rows))
             {
                 if (ctx.texture) SDL_DestroyTexture(ctx.texture);
 
                 ctx.texture = SDL_CreateTexture(ctx.renderer, SDL_PIXELFORMAT_BGR24, SDL_TEXTUREACCESS_STREAMING, task.image.cols, task.image.rows);
+
+                ctx.tex_w   = task.image.cols;
+                ctx.tex_h  = task.image.rows;
             }
 
             if (ctx.texture)

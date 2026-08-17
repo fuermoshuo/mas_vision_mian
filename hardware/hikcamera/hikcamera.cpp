@@ -56,12 +56,22 @@ hikcamera::HikCamera::HikCamera(const std::string &config_path)
             MAS_LOG_ERROR("gain not found, using default: {}", gain_);
         }
 
-        // 读取目标相机序列号（可选）。多台同型号相机接入同一主机时(待做)，提供多相机接口
-        if (camera_config["serial"])
+        // 读取传输延迟
+        if(camera_config["transfer_latency_ms"])
         {
-            target_serial_ = camera_config["serial"].as<std::string>();
-            MAS_LOG_INFO("Target camera serial number pinned from config: {}", target_serial_.c_str());
+            transfer_latency_ms_ = camera_config["transfer_latency_ms"].as<float>();
         }
+        else
+        {
+            MAS_LOG_ERROR("transfer_latency_ms not found, using default: {}", transfer_latency_ms_);
+        }
+
+        // 读取目标相机序列号（可选）。多台同型号相机接入同一主机时(待做)，提供多相机接口(为多相机留接口)
+        // if (camera_config["serial"])
+        // {
+        //     target_serial_ = camera_config["serial"].as<std::string>();
+        //     MAS_LOG_INFO("Target camera serial number pinned from config: {}", target_serial_.c_str());
+        // }
 
         MAS_LOG_INFO("Config loaded successfully from: {}", config_path.c_str());
         return;
@@ -101,9 +111,7 @@ bool hikcamera::HikCamera::openCamera()
 
     if (!lock.owns_lock())
     {
-        MAS_LOG_ERROR("openCamera: could not acquire camera_mutex_ within {} ms "
-                     "(capture thread likely stuck in a blocking SDK call); aborting this attempt",
-                     kCameraLockTimeoutMs);
+        MAS_LOG_ERROR("openCamera: could not acquire camera_mutex_ within {} ms ", kCameraLockTimeoutMs);
         return false;
     }
 
@@ -131,10 +139,14 @@ bool hikcamera::HikCamera::openCamera()
         sdk_initialized_ = true;
     }
 
+    // 每次打开都重新推导实际曝光值，避免沿用上一次连接（可能是另一台相机）的残留值
+    exposure_actual_us_            = 0.0f;
     // 设置曝光(初始化)，防止goto报错
     MVCC_FLOATVALUE stExposureTime = {0};
     // 设置gain
     MVCC_FLOATVALUE stGain         = {0};
+    // 用于读取实际曝光时间
+    MVCC_FLOATVALUE stExpActual    = {0};
 
     MV_CC_DEVICE_INFO *pDeviceInfo = NULL;
 
@@ -207,18 +219,19 @@ bool hikcamera::HikCamera::openCamera()
         MAS_LOG_WARN("RegisterExceptionCallBack failed! nRet 0x{0:x}; falling back to heartbeat-only disconnect detection", nRet);
     }
 
-
     // Exposure time
     nRet = MV_CC_GetFloatValue(handle, "ExposureTime", &stExposureTime);
     if (nRet != MV_OK)
     {
         MAS_LOG_WARN("Get ExposureTime failed! nRet 0x{0:x}; use camera default", nRet);
+        exposure_actual_us_ = exposure_time_;
     }
     else if (exposure_time_ < stExposureTime.fMin ||
              exposure_time_ > stExposureTime.fMax)
     {
         MAS_LOG_WARN("ExposureTime {} is outside [{}, {}]; use camera default",
-                     exposure_time_, stExposureTime.fMin, stExposureTime.fMax);
+                        exposure_time_, stExposureTime.fMin, stExposureTime.fMax);
+        exposure_actual_us_ = stExposureTime.fCurValue;
     }
     else
     {
@@ -226,11 +239,26 @@ bool hikcamera::HikCamera::openCamera()
         if (nRet != MV_OK)
         {
             MAS_LOG_WARN("Set ExposureTime failed! nRet 0x{0:x}; use camera default", nRet);
+            exposure_actual_us_ = stExposureTime.fCurValue;
+        }
+        else
+        {
+            exposure_actual_us_ = exposure_time_;
+        }
+
+        nRet = MV_CC_GetFloatValue(handle, "ExposureTime", &stExpActual);
+        if (nRet == MV_OK) 
+        {
+            exposure_actual_us_ = stExpActual.fCurValue;
+        }
+        else
+        {
+            MAS_LOG_WARN("ExposureTime readback after set failed! nRet 0x{0:x}", nRet);
         }
     }
 
     // Gain
-    nRet                   = MV_CC_GetFloatValue(handle, "Gain", &stGain);
+    nRet = MV_CC_GetFloatValue(handle, "Gain", &stGain);
     if (nRet != MV_OK)
     {
         MAS_LOG_WARN("Get Gain failed! nRet 0x{0:x}; use camera default", nRet);
@@ -292,6 +320,7 @@ bool hikcamera::HikCamera::openCamera()
         t_grab_started_ms_.store(now_ms, std::memory_order_relaxed);
     }
 
+    stats_reset_pending_.store(true, std::memory_order_relaxed);
     first_frame_pending_.store(true, std::memory_order_relaxed);
 
     // 启动内部采集/守护线程；若已在运行则为 no-op
@@ -327,21 +356,19 @@ void hikcamera::HikCamera::closeCamera()
     {
 
         auto t_close_start = std::chrono::steady_clock::now();
+        int nRetStop       = MV_CC_StopGrabbing(handle);
+        int nRetClose      = MV_CC_CloseDevice(handle);
 
-        if (isConnected)
+        if (nRetStop != MV_OK)
         {
-            int nRetStop  = MV_CC_StopGrabbing(handle);
-            int nRetClose = MV_CC_CloseDevice(handle);
-            if (nRetStop != MV_OK)
-            {
-                MAS_LOG_WARN("closeCamera: StopGrabbing fail! nRet 0x{0:x}", nRetStop);
-            }
-            if (nRetClose != MV_OK)
-            {
-                MAS_LOG_WARN("closeCamera: CloseDevice fail! nRet 0x{0:x}", nRetClose);
-            }
-            isConnected = false;
+            MAS_LOG_WARN("closeCamera: StopGrabbing fail! nRet 0x{0:x}", nRetStop);
         }
+        if (nRetClose != MV_OK)
+        {
+            MAS_LOG_WARN("closeCamera: CloseDevice fail! nRet 0x{0:x}", nRetClose);
+        }
+        isConnected = false;
+
         MV_CC_DestroyHandle(handle);
         handle = NULL;
 
@@ -369,7 +396,7 @@ void hikcamera::HikCamera::stopThreads()
     {
         return; // 未在运行
     }
-    queue_cv_.notify_all(); // 唤醒可能阻塞在 getImage() 里的消费者
+    queue_cv_.notify_all();                 // 唤醒可能阻塞在 getImage() 里的消费者
 
     if (capture_thread_.joinable())         // 等待采集线程退出
     {

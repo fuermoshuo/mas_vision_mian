@@ -7,8 +7,9 @@
 
 struct CameraFrame
 {
-    cv::Mat                               frame;
-    std::chrono::steady_clock::time_point timestamp;
+    cv::Mat                                frame;
+    std::chrono::steady_clock::time_point  timestamp;
+    std::chrono::steady_clock::time_point  t_recv; 
 };
 
 class Base_Camera
@@ -24,8 +25,6 @@ class Base_Camera
     
     virtual bool isConnectedStatus() const = 0;
 
-  protected:
-    std::string camera_type_;
 };
 
 #endif // _COMMON_DEF_H_
