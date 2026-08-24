@@ -13,9 +13,8 @@ Trajectory::Trajectory(const double v0, const double d, const double h)
     auto c     = a + h;
     auto delta = b * b - 4 * a * c;
 
-    if (delta < 0)
+    if (v0 <= 0.0 || delta < 0)
     {
-        unsolvable = true;
         return;
     }
 

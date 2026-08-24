@@ -16,7 +16,7 @@
     准确的方案需要搭配 strobe 并以MCU的始终为准
     当前方案实际公式  t_曝光中点 = t_recv − (实际曝光/2 + 传输延迟)
 
-    transfer_latency_ms_ 由 `./base calibrate_latency` 标定
+    transfer_latency_ms_为传输延迟 由 `./base calibrate_latency` 标定
 */
 
 // 采集线程：持续抓帧、转换、推入队列，并更新心跳时间戳。

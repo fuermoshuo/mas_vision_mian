@@ -1,11 +1,13 @@
 #include "armor_detector.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <fmt/format.h>
 #include <fstream>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "armor_types.hpp"
 #include "display.hpp"
@@ -14,6 +16,20 @@
 
 namespace auto_aim
 {
+namespace
+{
+// 单像素颜色差异门限
+constexpr int TARGET_COLOR_MARGIN = 20;
+
+constexpr bool matchesTargetColor(int diff_sum, int valid_count)
+{
+    return valid_count > 0 && diff_sum > TARGET_COLOR_MARGIN * valid_count;
+}
+
+static_assert(!matchesTargetColor(0, 27));
+static_assert(matchesTargetColor(21 * 27, 27));
+static_assert(!matchesTargetColor(-21 * 27, 27));
+} // namespace
 
 ArmorDetector::ArmorDetector(const std::string &config_path)
 {
@@ -37,6 +53,7 @@ ArmorDetector::ArmorDetector(const std::string &config_path)
             YAML::Node armor_detector = config["auto_aim"]["armor_detector"];
             // 读取基础参数
             debug_ = armor_detector["debug"].as<bool>(false);
+            plotter_enable_ = armor_detector["plotter_enable"].as<bool>(false);
             // 读取二值化参数
             binary_thres_ = armor_detector["binary_thres"].as<int>(90);
             // 读取颜色参数
@@ -94,6 +111,8 @@ ArmorDetector::ArmorDetector(const std::string &config_path)
 
 std::vector<Armor> ArmorDetector::ArmorDetect(const cv::Mat &bgr_img, std::string window_name) noexcept
 {
+    stats_ = {};
+
     if (bgr_img.empty() || bgr_img.cols <= 0 || bgr_img.rows <= 0)
     {
         MAS_LOG_WARN("Invalid input image");
@@ -120,6 +139,43 @@ std::vector<Armor> ArmorDetector::ArmorDetect(const cv::Mat &bgr_img, std::strin
     // 查找装甲板
     armors_ = findArmors(lights_, bgr_img);
 
+    if (plotter_enable_)
+    {
+        const char *stage = "detected";
+        if (stats_.contour_count == 0) stage = "no_contour";
+        else if (stats_.geometry_light_count == 0) stage = "light_geometry";
+        else if (stats_.color_light_count < 2) stage = "light_color_or_count";
+        else if (stats_.armor_candidate_count == 0) stage = "armor_pair";
+        else if (stats_.classifier_pass_count == 0) stage = "classifier";
+
+        nlohmann::json data;
+        data["detector"]["stage"]                 = stage;
+        data["detector"]["contour_count"]         = stats_.contour_count;
+        data["detector"]["contour_too_small"]     = stats_.contour_too_small;
+        data["detector"]["light_reject_area"]     = stats_.light_reject_area;
+        data["detector"]["light_reject_angle"]    = stats_.light_reject_angle;
+        data["detector"]["light_reject_ratio"]    = stats_.light_reject_ratio;
+        data["detector"]["light_reject_length"]   = stats_.light_reject_length;
+        data["detector"]["light_reject_color"]    = stats_.light_reject_color;
+        data["detector"]["geometry_light_count"]  = stats_.geometry_light_count;
+        data["detector"]["color_light_count"]     = stats_.color_light_count;
+        data["detector"]["armor_candidate_count"] = stats_.armor_candidate_count;
+        data["detector"]["classifier_pass_count"] = stats_.classifier_pass_count;
+        data["detector"]["classifier_model_error"] = stats_.classifier_model_error;
+        data["detector"]["classifier_low_confidence"] = stats_.classifier_low_confidence;
+        data["detector"]["classifier_negative_class"] = stats_.classifier_negative_class;
+        data["detector"]["classifier_type_mismatch"] = stats_.classifier_type_mismatch;
+        data["detector"]["classifier_confidence_mean"] = stats_.classifier_evaluated_count == 0
+                                                               ? 0.0
+                                                               : stats_.classifier_confidence_sum / stats_.classifier_evaluated_count;
+        data["detector"]["classifier_confidence_max"] = stats_.classifier_confidence_max;
+        data["detector"]["pair_reject_contain_light"] = stats_.pair_reject_contain_light;
+        data["detector"]["pair_reject_ratio"] = stats_.pair_reject_ratio;
+        data["detector"]["pair_reject_side_ratio"] = stats_.pair_reject_side_ratio;
+        data["detector"]["pair_reject_rectangular_error"] = stats_.pair_reject_rectangular_error;
+        plotter_.plot(data);
+    }
+
     // 显示结果
     if (debug_)
     {
@@ -134,6 +190,7 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
     // 查找轮廓
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(bin_img, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    stats_.contour_count = contours.size();
 
     std::vector<LightBar> lightbars;
     lightbars.reserve(20);
@@ -141,13 +198,20 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
     for (const auto &contour : contours)
     {
         // 初步过滤
-        if (contour.size() < 4) continue;
-
+        if (contour.size() < 4) 
+        {
+            stats_.contour_too_small++;
+            continue;
+        }
         // 计算轮廓面积
         double contour_area = cv::contourArea(contour);
 
         // 面积过滤
-        if (contour_area > max_lightbar_area_) continue;
+        if (contour_area > max_lightbar_area_)
+        {
+            stats_.light_reject_area++;
+            continue;
+        } 
 
         // 旋转矩形
         auto r_rect = cv::minAreaRect(contour);
@@ -156,13 +220,24 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
         auto lightbar = LightBar(r_rect);
 
         // 根据几何条件过滤
-        if (lightbar.angle_error > max_angle_error_ || lightbar.ratio < min_lightbar_ratio_ || lightbar.ratio > max_lightbar_ratio_ ||
-            lightbar.length < min_lightbar_length_)
+        if (lightbar.angle_error > max_angle_error_)
         {
+            stats_.light_reject_angle++;
             continue;
         }
+        if (lightbar.ratio < min_lightbar_ratio_ || lightbar.ratio > max_lightbar_ratio_)
+        {
+            stats_.light_reject_ratio++;
+            continue;
+        }
+        if (lightbar.length < min_lightbar_length_)
+        {
+            stats_.light_reject_length++;
+            continue;
+        }
+        stats_.geometry_light_count++;
 
-        // 颜色识别：沿灯条轴线采样
+        // 颜色识别：在灯条区域内采样，避免单条中心线被反光或运动模糊误判
         if (!src_img.empty() && src_img.channels() == 3)
         {
             const int      cols      = src_img.cols;
@@ -171,38 +246,47 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
             const size_t   stride    = src_img.step;
             const bool     is_red    = (detect_color_ == EnemyColor::RED);
 
-            constexpr int N_SAMPLES   = 10;
-            cv::Point2f   sample_step = (lightbar.bottom - lightbar.top) / static_cast<float>(N_SAMPLES);
-            int           diff_sum    = 0;
-            int           valid_count = 0;
-
-            for (int i = 1; i < N_SAMPLES; i++)
+            constexpr int  N_LENGTH_SAMPLES = 10;
+            constexpr int  N_WIDTH_SAMPLES  = 3;
+            cv::Point2f    axis             = lightbar.bottom - lightbar.top;
+            const float    axis_length      = cv::norm(axis);
+            if (axis_length < 1e-3f)
             {
-                cv::Point2f pt = lightbar.top + sample_step * static_cast<float>(i);
-                int         px = static_cast<int>(pt.x);
-                int         py = static_cast<int>(pt.y);
-                if (px < 0 || px >= cols || py < 0 || py >= rows) continue;
+                continue;
+            }
+            axis *= 1.0f / axis_length;
+            const cv::Point2f perpendicular(-axis.y, axis.x); // axis 的垂直方向单位向量
+            int               diff_sum    = 0;
+            int               valid_count = 0;
 
-                const uint8_t *pixel = pixel_ptr + py * stride + px * 3;
-                if (is_red)
+            for (int i = 1; i < N_LENGTH_SAMPLES; i++)
+            {
+                const float length_ratio = static_cast<float>(i) / N_LENGTH_SAMPLES;
+                const cv::Point2f center = lightbar.top + (lightbar.bottom - lightbar.top) * length_ratio;
+                for (int j = 0; j < N_WIDTH_SAMPLES; ++j)
                 {
-                    diff_sum += (pixel[2] - pixel[0]); // R - B
+                    const float width_ratio = (static_cast<float>(j) - 1.0f) / 2.0f;
+                    const cv::Point2f pt = center + perpendicular * static_cast<float>(lightbar.width * width_ratio * 0.5);
+                    const int px = static_cast<int>(pt.x);
+                    const int py = static_cast<int>(pt.y);
+                    if (px < 0 || px >= cols || py < 0 || py >= rows) continue;
+
+                    const uint8_t *pixel = pixel_ptr + py * stride + px * 3;
+                    diff_sum += is_red ? (pixel[2] - pixel[0]) : (pixel[0] - pixel[2]);
+                    valid_count++;
                 }
-                else
-                {
-                    diff_sum += (pixel[0] - pixel[2]); // B - R
-                }
-                valid_count++;
             }
 
-            // 过滤掉颜色不匹配的灯条
-            if (valid_count == 0 || diff_sum <= 0)
+            // 必须明确偏向目标颜色；运动模糊或过曝形成的中性白光不能用于敌我判断。
+            if (!matchesTargetColor(diff_sum, valid_count))
             {
+                stats_.light_reject_color++;
                 continue;
             }
             lightbar.color = is_red ? EnemyColor::RED : EnemyColor::BLUE;
         }
 
+        stats_.color_light_count++;
         lightbars.emplace_back(lightbar);
     }
 
@@ -224,14 +308,30 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
         {
             if (left->color != right->color) continue;
             // 检查是否存在共用灯条的情况
-            if (containLight(left - lights.begin(), right - lights.begin(), lights)) continue;
+            if (containLight(left - lights.begin(), right - lights.begin(), lights))
+            {
+                stats_.pair_reject_contain_light++;
+                continue;
+            }
 
             auto armor = Armor(*left, *right);
 
             // 几何特征判断
-            if (armor.ratio < min_armor_ratio_ || armor.ratio > max_armor_ratio_ || armor.side_ratio > max_side_ratio_ ||
-                armor.rectangular_error > max_rectangular_error_)
+            if (armor.ratio < min_armor_ratio_ || armor.ratio > max_armor_ratio_)
+            {
+                stats_.pair_reject_ratio++;
                 continue;
+            }
+            if (armor.side_ratio > max_side_ratio_)
+            {
+                stats_.pair_reject_side_ratio++;
+                continue;
+            }
+            if (armor.rectangular_error > max_rectangular_error_)
+            {
+                stats_.pair_reject_rectangular_error++;
+                continue;
+            }
 
             // 装甲板类型判断
             if (armor.ratio > 3.0)
@@ -246,29 +346,55 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
             candidates.emplace_back(armor);
         }
     }
+    
+    stats_.armor_candidate_count = candidates.size();
 
     for (auto &armor : candidates)
     {
         // 数字识别
-        classifier->classify(src_img, armor);
-        if (armor.number == "negative") continue;
+        const auto reject_reason = classifier->classify(src_img, armor);
+        if (reject_reason != NumberClassifier::RejectReason::MODEL_NOT_LOADED)
+        {
+            stats_.classifier_evaluated_count++;
+            stats_.classifier_confidence_sum += armor.confidence;
+            stats_.classifier_confidence_max = std::max(stats_.classifier_confidence_max, static_cast<double>(armor.confidence));
+        }
+        switch (reject_reason)
+        {
+        case NumberClassifier::RejectReason::MODEL_NOT_LOADED:
+            stats_.classifier_model_error++;
+            break;
+        case NumberClassifier::RejectReason::LOW_CONFIDENCE:
+            stats_.classifier_low_confidence++;
+            break;
+        case NumberClassifier::RejectReason::NEGATIVE_CLASS:
+            stats_.classifier_negative_class++;
+            break;
+        case NumberClassifier::RejectReason::TYPE_MISMATCH:
+            stats_.classifier_type_mismatch++;
+            break;
+        case NumberClassifier::RejectReason::PASS:
+            break;
+        }
+        if (reject_reason != NumberClassifier::RejectReason::PASS) continue;
 
         // 角点优化
         light_corner_corrector_.correctCorners(armor, gray_);
 
         armors.emplace_back(armor);
     }
+    stats_.classifier_pass_count = armors.size();
 
     return armors;
 }
 
 bool ArmorDetector::containLight(const int i, const int j, const std::vector<LightBar> &lights) noexcept
 {
-    const LightBar &light_1 = lights[i], light_2 = lights[j];
-    auto            points        = std::vector<cv::Point2f>{light_1.top, light_1.bottom, light_2.top, light_2.bottom};
-    auto            bounding_rect = cv::boundingRect(points);
+    const LightBar &light_1       = lights[i], light_2 = lights[j];
     double          avg_length    = (light_1.length + light_2.length) / 2.0;
     double          avg_width     = (light_1.width + light_2.width) / 2.0;
+
+    const std::vector<cv::Point2f> armor_polygon{light_1.top, light_2.top, light_2.bottom, light_1.bottom};
     // 仅检查这两个灯条之间的灯条
     for (int k = i + 1; k < j; k++)
     {
@@ -285,7 +411,9 @@ bool ArmorDetector::containLight(const int i, const int j, const std::vector<Lig
             continue;
         }
 
-        if (bounding_rect.contains(test_light.top) || bounding_rect.contains(test_light.bottom) || bounding_rect.contains(test_light.center))
+        if (cv::pointPolygonTest(armor_polygon, test_light.top, false) >= 0 ||
+            cv::pointPolygonTest(armor_polygon, test_light.bottom, false) >= 0 ||
+            cv::pointPolygonTest(armor_polygon, test_light.center, false) >= 0)
         {
             return true;
         }

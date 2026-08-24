@@ -4,6 +4,8 @@
 #include <Eigen/Geometry>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,8 @@ class UserSerial
      * @param fire_advice 开火建议
      */
     void sendVision(float target_yaw = 0.0f, float target_pitch = 0.0f, uint8_t found = 0, uint8_t fire_advice = 0);
+    /** 禁用视觉跟随和开火，保留最后一次目标角度。 */
+    void disableVision();
     /*
      * @brief 发送导航数据
      * @param vx x 方向速度
@@ -75,17 +79,26 @@ class UserSerial
      */
     bool isQuaternionValid() const;
 
+    /** 返回最近一次合法四元数的主机接收年龄，未收到时返回 -1。 */
+    int64_t quaternionAgeMs() const;
+
     /**
      * @brief 获取当前模式
      * @return VisionMode 模式
      */
-    VisionMode getVisionMode() const { return vision_mode_; }
+    VisionMode getVisionMode() const { return vision_mode_.load(); }
+
+    bool hasReceivedData() const { return has_received_data_.load(); }
 
     /**
      * @brief 获取裁判系统数据
      * @return RefereePacket 裁判系统数据
      */
-    RefereePacket getRefereeData() const { return referee_data_; }
+    RefereePacket getRefereeData() const
+    {
+        std::lock_guard<std::mutex> lock(referee_mutex_);
+        return referee_data_;
+    }
 
   private:
     UserSerial(const std::string &config_path = "config/serial_config.yaml");
@@ -94,34 +107,34 @@ class UserSerial
     std::shared_ptr<serial::Serial>       serial_port;
     std::atomic<bool>                     isConnected{false};
     std::chrono::steady_clock::time_point last_reconnect_time_;
-    std::chrono::steady_clock::time_point last_data_receive_time_;  // 最后接收数据时间
+    std::atomic<int64_t>                  last_data_receive_ms_{0};
 
     // 发送数据包
-    SendPacket send_packet_{0XBB, 0, 0, 0, 0, 0.0f, 0.0f, 0X5B};
+    SendPacket send_packet_{};
+    std::mutex send_packet_mutex_;
 
     // 配置参数
-    std::string           port_;
-    uint32_t              baudrate_;
-    int                   timeout_;
-    serial::bytesize_t    bytesize_;
-    serial::parity_t      parity_;
-    serial::stopbits_t    stopbits_;
-    serial::flowcontrol_t flowcontrol_;
-    bool                  debug_;
+    std::string           port_{"/dev/mascdc"};
+    uint32_t              baudrate_{115200};
+    int                   timeout_{2};
+    serial::bytesize_t    bytesize_{serial::eightbits};
+    serial::parity_t      parity_{serial::parity_none};
+    serial::stopbits_t    stopbits_{serial::stopbits_one};
+    serial::flowcontrol_t flowcontrol_{serial::flowcontrol_none};
+    bool                  debug_{false};
+    int                   data_timeout_ms_{100};
 
     // 接收缓冲区
     std::vector<uint8_t> recv_buffer_;
     std::vector<uint8_t> temp_read_buf_;
-    VisionMode           vision_mode_;
-    RefereePacket        referee_data_; // 接收到的裁判系统数据
+    std::atomic<VisionMode> vision_mode_{VisionMode::AUTO_AIM_RED};
+    RefereePacket          referee_data_{}; // 接收到的裁判系统数据
+    mutable std::mutex     referee_mutex_;
 
     // 数据队列
     rigtorp::SPSCQueue<QuaternionWithTimestamp> data_queue_{5000};
     QuaternionWithTimestamp data_ahead_;
     QuaternionWithTimestamp data_behind_;
-    
-    // 数据超时配置 (毫秒)
-    static constexpr int DATA_TIMEOUT_MS = 1000;
     
     // 标志位：是否收到过至少一次有效数据
     std::atomic<bool> has_received_data_{false};

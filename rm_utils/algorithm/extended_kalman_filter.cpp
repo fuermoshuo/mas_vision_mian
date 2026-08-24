@@ -4,6 +4,8 @@
 
 namespace rm_utils
 {
+
+// x = [center_x, vx, center_y, vy, center_z, vz, yaw, omega, r, l, h]
 ExtendedKalmanFilter::ExtendedKalmanFilter(const Eigen::VectorXd &x0, const Eigen::MatrixXd &P0,
                                            std::function<Eigen::VectorXd(const Eigen::VectorXd &, const Eigen::VectorXd &)> x_add)
     : x(x0), P(P0), I(Eigen::MatrixXd::Identity(x0.rows(), x0.rows())), x_add(x_add)

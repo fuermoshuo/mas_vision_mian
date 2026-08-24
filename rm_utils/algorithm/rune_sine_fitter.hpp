@@ -30,8 +30,7 @@
  *****************************************************************************/
 
 /* To do
-        1. 让每个固定频率的 Huber-IRLS 真正收敛
-        2. 判断数据是否值得信任
+        
 */
 
 #pragma once
@@ -58,15 +57,16 @@ class rune_sine_fitter
 public:
     struct Result
     {
-        double A       = 0.0;
-        double omega   = 0.0;
-        double phi     = 0.0;
-        double C       = 0.0;
-        int    inliers = 0;
+        double A        = 0.0;
+        double omega    = 0.0;
+        double phi      = 0.0;
+        double C        = 0.0;
+        int    inliers  = 0;
+        bool   is_valid = false;
     };
     Result best_result_;
 
-    rune_sine_fitter(int max_iterations, double threshold, double ridge_penalty, double num_segments);
+    rune_sine_fitter(int max_iterations, double threshold, double ridge_penalty, int num_segments);
 
     void add_data(double t, double v);
 
@@ -88,8 +88,7 @@ public:
 
 private:
     int    max_iterations = 3;                                      // Huber IRLS 最大迭代次数
-    double num_segments_  = 50;                                     // ω 网格分段数量
-    double best_cost      = std::numeric_limits<double>::max();
+    int    num_segments_  = 50;                                     // ω 网格分段数量
     double threshold_;                                              // Huber 阈值 
     double ridge_penalty_;                                          // 岭正则系数 
 

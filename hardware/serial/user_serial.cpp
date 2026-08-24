@@ -38,6 +38,7 @@ UserSerial::UserSerial(const std::string &config_path)
             if (config["serial"]["port"]) port_ = config["serial"]["port"].as<std::string>();
             if (config["serial"]["baudrate"]) baudrate_ = config["serial"]["baudrate"].as<uint32_t>(115200);
             if (config["serial"]["timeout"]) timeout_ = config["serial"]["timeout"].as<int>(2);
+            if (config["serial"]["data_timeout_ms"]) data_timeout_ms_ = config["serial"]["data_timeout_ms"].as<int>(100);
             if (config["serial"]["bytesize"])
             {
                 int bs = config["serial"]["bytesize"].as<int>(8);
@@ -109,9 +110,7 @@ UserSerial::UserSerial(const std::string &config_path)
 
     recv_buffer_.reserve(1024);
     temp_read_buf_.resize(256);
-    // 初始化为一个很久以前的时间，确保 isQuaternionValid() 在收到第一个数据包前返回 false
-    last_data_receive_time_ = std::chrono::steady_clock::time_point(); // epoch time
-    has_received_data_.store(false);                                   // 标记尚未收到数据
+    has_received_data_.store(false);
     // 初始化滑动窗口
     data_ahead_.quaternion  = Eigen::Quaterniond::Identity();
     data_behind_.quaternion = Eigen::Quaterniond::Identity();
@@ -159,14 +158,26 @@ void UserSerial::closeSerial()
 
 void UserSerial::sendVision(float target_yaw, float target_pitch, uint8_t found, uint8_t fire_advice)
 {
-    send_packet_.target_yaw   = target_yaw;
-    send_packet_.target_pitch = target_pitch;
+    std::lock_guard<std::mutex> lock(send_packet_mutex_);
+    if (found)
+    {
+        send_packet_.target_yaw   = target_yaw;
+        send_packet_.target_pitch = target_pitch;
+    }
     send_packet_.found        = found;
-    send_packet_.fire_advice  = fire_advice;
+    send_packet_.fire_advice  = found ? fire_advice : 0;
+}
+
+void UserSerial::disableVision()
+{
+    std::lock_guard<std::mutex> lock(send_packet_mutex_);
+    send_packet_.found       = 0;
+    send_packet_.fire_advice = 0;
 }
 
 void UserSerial::sendNav(float vx, float vy, uint8_t nav_state)
 {
+    std::lock_guard<std::mutex> lock(send_packet_mutex_);
     send_packet_.vx        = vx;
     send_packet_.vy        = vy;
     send_packet_.nav_state = nav_state;
@@ -182,7 +193,12 @@ void UserSerial::sendPacketToSerial()
 
     try
     {
-        serial_port->write(reinterpret_cast<const uint8_t *>(&send_packet_), sizeof(SendPacket));
+        SendPacket packet;
+        {
+            std::lock_guard<std::mutex> lock(send_packet_mutex_);
+            packet = send_packet_;
+        }
+        serial_port->write(reinterpret_cast<const uint8_t *>(&packet), sizeof(packet));
     }
     catch (const std::exception &e)
     {
@@ -248,46 +264,40 @@ void UserSerial::receiveSerial()
 
                 if (packet.tail == 0x5A)
                 {
-                    // 更新最后接收数据时间，只要收到有效数据包就说明连接正常
-                    last_data_receive_time_ = std::chrono::steady_clock::now();
-                    has_received_data_.store(true); // 标记已收到过数据
-
                     Eigen::Quaterniond q(packet.q[0], packet.q[1], packet.q[2], packet.q[3]);
-                    q.normalize();
-
-                    //
-                    bool success = data_queue_.try_push({q, last_data_receive_time_});
-
-                    #ifdef SENTRY
-                    referee_data_ = packet.referee_data; // 更新裁判系统数据
-                    #endif
-                    recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + sizeof(ReceivePacket));
-
-                    switch (packet.mode)
+                    const double norm = q.norm();
+                    if (std::isfinite(q.w()) && std::isfinite(q.x()) && std::isfinite(q.y()) && std::isfinite(q.z()) && norm > 1e-6)
                     {
-                    case 0:
-                        vision_mode_ = VisionMode::AUTO_AIM_RED;
-                        break;
-                    case 1:
-                        vision_mode_ = VisionMode::AUTO_AIM_BLUE;
-                        break;
-                    case 2:
-                        vision_mode_ = VisionMode::SMALL_RUNE_RED;
-                        break;
-                    case 3:
-                        vision_mode_ = VisionMode::SMALL_RUNE_BLUE;
-                        break;
-                    case 4:
-                        vision_mode_ = VisionMode::BIG_RUNE_RED;
-                        break;
-                    case 5:
-                        vision_mode_ = VisionMode::BIG_RUNE_BLUE;
-                        break;
-                    default:
-                        vision_mode_ = VisionMode::AUTO_AIM_RED;
-                        MAS_LOG_WARN("[UserSerial] Invalid mode: {}", packet.mode);
-                        break;
+                        q.normalize();
+                        const auto received_at = std::chrono::steady_clock::now();
+                        if (data_queue_.try_push({q, received_at}))
+                        {
+                            switch (packet.mode)
+                            {
+                            case 0: vision_mode_.store(VisionMode::AUTO_AIM_RED); break;
+                            case 1: vision_mode_.store(VisionMode::AUTO_AIM_BLUE); break;
+                            case 2: vision_mode_.store(VisionMode::SMALL_RUNE_RED); break;
+                            case 3: vision_mode_.store(VisionMode::SMALL_RUNE_BLUE); break;
+                            case 4: vision_mode_.store(VisionMode::BIG_RUNE_RED); break;
+                            case 5: vision_mode_.store(VisionMode::BIG_RUNE_BLUE); break;
+                            default:
+                                vision_mode_.store(VisionMode::AUTO_AIM_RED);
+                                MAS_LOG_WARN("[UserSerial] Invalid mode: {}", packet.mode);
+                                break;
+                            }
+
+#ifdef SENTRY
+                            {
+                                std::lock_guard<std::mutex> lock(referee_mutex_);
+                                referee_data_ = packet.referee_data;
+                            }
+#endif
+                            const auto received_ms = std::chrono::duration_cast<std::chrono::milliseconds>(received_at.time_since_epoch()).count();
+                            last_data_receive_ms_.store(received_ms);
+                            has_received_data_.store(true);
+                        }
                     }
+                    recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + sizeof(ReceivePacket));
                 }
                 else
                 {
@@ -329,14 +339,12 @@ void UserSerial::reconnect()
     }
     isConnected = false;
 
-    // 清空队列
-    while (data_queue_.front())
-    {
-        data_queue_.pop();
-    }
+    disableVision();
+    recv_buffer_.clear();
 
-    // 重置接收标志位，但不重置时间戳
+    // data_queue_ 是单生产者/单消费者队列，重连线程不能从生产者侧 pop。上层靠标志位拒绝使用旧数据
     has_received_data_.store(false);
+    last_data_receive_ms_.store(0);
 
     try
     {
@@ -357,31 +365,18 @@ void UserSerial::reconnect()
 
 bool UserSerial::isQuaternionValid() const
 {
-    // 如果从未收到过数据，直接返回 false
-    if (!has_received_data_.load())
-    {
-        MAS_LOG_ERROR("no data received");
-        return false;
-    }
+    const auto age_ms = quaternionAgeMs();
+    return age_ms >= 0 && age_ms <= data_timeout_ms_;
+}
 
-    auto now         = std::chrono::steady_clock::now();
-    auto data_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_data_receive_time_).count();
+int64_t UserSerial::quaternionAgeMs() const
+{
+    if (!has_received_data_.load()) return -1;
 
-    // 检查数据是否超时
-    if (data_age_ms > DATA_TIMEOUT_MS)
-    {
-        //MAS_LOG_ERROR("data timeout");
-        return false;
-    }
-
-    // 检查队列是否为空，如果为空说明没有可用的四元数数据
-    if (data_queue_.empty())
-    {
-        //MAS_LOG_ERROR("data queue empty");
-        return false;
-    }
-
-    return true;
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    return now_ms - last_data_receive_ms_.load();
 }
 
 Eigen::Quaterniond UserSerial::q(std::chrono::steady_clock::time_point t)

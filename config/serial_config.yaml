@@ -3,6 +3,7 @@ serial:
   port: "/dev/mascdc"
   baudrate: 115200
   timeout: 2
+  data_timeout_ms: 100
   bytesize: 8
   parity: "none"
   stopbits: 1

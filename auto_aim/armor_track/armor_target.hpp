@@ -19,6 +19,14 @@ namespace auto_aim
 class Target
 {
   public:
+    enum class UpdateRejectReason
+    {
+        NONE,
+        NONFINITE,
+        Z_INNOVATION,
+        POSITION_INNOVATION
+    };
+
     std::string name;         // 目标编号
     ArmorType   armor_type;   // 装甲板类型
     int         priority;     // 优先级
@@ -39,7 +47,8 @@ class Target
      * @param armor_num 装甲板数量
      * @param P0_dig 初始协方差对角线
      */
-    Target(const Armor &armor, std::chrono::steady_clock::time_point t, double radius, int armor_num, const Eigen::VectorXd &P0_dig);
+    Target(const Armor &armor, std::chrono::steady_clock::time_point t, double radius, int armor_num, const Eigen::VectorXd &P0_dig,
+           double max_z_innovation, double max_position_innovation);
 
     /**
      * @brief 预测目标在未来时刻的状态
@@ -50,8 +59,15 @@ class Target
     /**
      * @brief 更新EKF状态
      * @param armor 观测到的装甲板
+     * @return 观测是否通过离群检查并更新了 EKF
      */
-    void update(const Armor &armor);
+    bool update(const Armor &armor);
+
+    // 记录跟踪器更新被拒绝的原因
+    UpdateRejectReason last_update_reject_reason() const { return last_update_reject_reason_; }
+
+    double last_innovation_z() const { return last_innovation_z_; }
+    double last_innovation_norm() const { return last_innovation_norm_; }
 
     /**
      * @brief 获取 EKF 状态向量
@@ -87,6 +103,11 @@ class Target
     rm_utils::ExtendedKalmanFilter        ekf_;          // EKF滤波器
     std::chrono::steady_clock::time_point timestamp_;    // 时间戳
     bool                                  is_converged_; // 是否收敛
+    double                                max_z_innovation_          = 0.25;      // Z 方向新息最大允许阈值
+    double                                max_position_innovation_   = 0.8;       // 位置新息最大允许阈值
+    UpdateRejectReason                    last_update_reject_reason_ = UpdateRejectReason::NONE;
+    double                                last_innovation_z_         = 0.0;       // 上一帧更新的 z 方向新息
+    double                                last_innovation_norm_      = 0.0;       // 上一帧更新的位移新息
 
     /**
      * @brief 更新EKF（yaw, pitch, distance, angle）

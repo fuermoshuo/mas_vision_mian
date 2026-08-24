@@ -8,13 +8,24 @@
 
 namespace auto_aim
 {
+namespace
+{
+constexpr bool radiusModelValid(double r, double l)
+{
+    return r > 0.05 && r <= 0.45 && r + l > 0.05 && r + l <= 0.5;
+}
+
+static_assert(radiusModelValid(0.25, 0.25));
+} // namespace
 
 /**
  * @brief 构造函数
  * @details 根据装甲板初始化EKF状态向量和协方差矩阵
  */
-Target::Target(const Armor &armor, std::chrono::steady_clock::time_point t, double radius, int armor_num, const Eigen::VectorXd &P0_dig)
-    : jumped(false), last_id(0), armor_num(armor_num), update_count(0), is_switch(false), switch_count(0), is_converged_(false), timestamp_(t)
+Target::Target(const Armor &armor, std::chrono::steady_clock::time_point t, double radius, int armor_num, const Eigen::VectorXd &P0_dig,
+               double max_z_innovation, double max_position_innovation)
+    : jumped(false), last_id(0), armor_num(armor_num), update_count(0), is_switch(false), switch_count(0), timestamp_(t), is_converged_(false),
+      max_z_innovation_(max_z_innovation), max_position_innovation_(max_position_innovation)
 {
     name       = armor.number;
     armor_type = armor.type;
@@ -66,7 +77,7 @@ void Target::predict(std::chrono::steady_clock::time_point t)
     auto   a   = dt * dt * dt * dt / 4;
     auto   b   = dt * dt * dt / 2;
     auto   c   = dt * dt;
-    double q_h = (name == "outpost") ? 0.0 : 1e-3;
+    double q_h = (name == "outpost") ? 0.0 : 1e-6;
 
     // 过程噪声矩阵 Q
     Eigen::MatrixXd Q{
@@ -93,7 +104,7 @@ void Target::predict(std::chrono::steady_clock::time_point t)
  * @brief 更新 EKF 状态
  * @details 匹配装甲板并更新 EKF
  */
-void Target::update(const Armor &armor)
+bool Target::update(const Armor &armor)
 {
     // 装甲板匹配：按距离和角度综合评分，只匹配最近的 3 个
     int         best_id         = 0;
@@ -118,24 +129,49 @@ void Target::update(const Armor &armor)
     int match_count = std::min(3, (int)xyza_i_list.size());
     for (int i = 0; i < match_count; i++)
     {
-        const auto     &xyza = xyza_i_list[i].first;
-        int            id    = xyza_i_list[i].second;
-        Eigen::Vector3d ypd  = rm_utils::xyz2ypd(xyza.head(3));
-        
-        // 计算角度误差：包括 yaw 角误差和位置 yaw 误差
-        double yaw_error = std::abs(rm_utils::limit_rad(armor.ypr_in_world[0] - xyza[3]));
-        double pos_yaw_error = std::abs(rm_utils::limit_rad(armor.ypd_in_world[0] - ypd[0]));
-        
-        // 综合评分：距离权重 + 角度权重
-        // 对于中速旋转目标，增加角度权重以防止误匹配
-        double angle_weight = (name != "outpost" && std::abs(ekf_.x[7]) > 2.0) ? 2.0 : 1.0;
-        double score = ypd[2] + angle_weight * (yaw_error + pos_yaw_error) * 10.0;
+        const auto &xyza = xyza_i_list[i].first;
+        const int   id   = xyza_i_list[i].second;
+
+        const Eigen::Vector3d innovation =
+            armor.xyz_in_world - xyza.head<3>();
+
+        if (!innovation.allFinite())
+        {
+            continue;
+        }
+        const double xy_error =innovation.head<2>().norm() / max_position_innovation_;
+        const double z_error =std::abs(innovation.z()) / max_z_innovation_;
+        const double yaw_error = std::abs(rm_utils::limit_rad(armor.ypr_in_world[0] - xyza[3]));
+        const double angle_weight =(name != "outpost" && std::abs(ekf_.x[7]) > 2.0)? 2.0: 1.0;
+        const double score =xy_error + z_error + angle_weight * yaw_error / CV_PI;
 
         if (score < min_score)
         {
             min_score = score;
             best_id   = id;
         }
+    }
+
+    const Eigen::Vector3d predicted_xyz = xyza_list[best_id].head<3>();
+    const Eigen::Vector3d innovation    = armor.xyz_in_world - predicted_xyz;
+    last_innovation_z_                  = innovation.z();
+    last_innovation_norm_               = innovation.norm();
+    last_update_reject_reason_          = UpdateRejectReason::NONE;
+
+    if (!armor.xyz_in_world.allFinite() || !predicted_xyz.allFinite() || !innovation.allFinite())
+    {
+        last_update_reject_reason_ = UpdateRejectReason::NONFINITE;
+        return false;
+    }
+    if (std::abs(last_innovation_z_) > max_z_innovation_)
+    {
+        last_update_reject_reason_ = UpdateRejectReason::Z_INNOVATION;
+        return false;
+    }
+    if (last_innovation_norm_ > max_position_innovation_)
+    {
+        last_update_reject_reason_ = UpdateRejectReason::POSITION_INNOVATION;
+        return false;
     }
 
     // 更新目标状态
@@ -150,6 +186,7 @@ void Target::update(const Armor &armor)
 
     //约束状态向量
     constrainState();
+    return true;
 }
 
 /**
@@ -303,12 +340,7 @@ std::vector<Eigen::Vector4d> Target::armor_xyza_list() const
  */
 bool Target::diverged() const
 {
-    // 检查旋转半径r是否在合理范围 [0.05, 0.5]
-    auto r_ok = ekf_.x[8] > 0.05 && ekf_.x[8] < 0.5;
-    // 检查大装甲板半径(r+l)是否在合理范围
-    auto l_ok = ekf_.x[8] + ekf_.x[9] > 0.05 && ekf_.x[8] + ekf_.x[9] < 0.5;
-
-    return !(r_ok && l_ok);
+    return !radiusModelValid(ekf_.x[8], ekf_.x[9]);
 }
 
 /**

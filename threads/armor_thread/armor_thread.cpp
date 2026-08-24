@@ -21,8 +21,9 @@ void armor_thread_func(std::shared_ptr<rigtorp::SPSCQueue<CameraFrame>> hikcamer
     auto_aim::ArmorShoot    shooter("config/auto_aim.yaml");
 
     // 获取串口
-    UserSerial &serial    = UserSerial::getInstance();
-    VisionMode  last_mode = AUTO_AIM_RED;
+    UserSerial &serial                = UserSerial::getInstance();
+    VisionMode  last_mode             = static_cast<VisionMode>(0);     // 既得考虑裁判系统，又得考虑不加裁判系统后怎么处理电控方统一发的AUTO_AIM_RED
+    bool        last_quaternion_valid = false;
 
     while (!g_shutdown)
     {
@@ -30,8 +31,8 @@ void armor_thread_func(std::shared_ptr<rigtorp::SPSCQueue<CameraFrame>> hikcamer
 
         VisionMode current_mode = serial.getVisionMode();
 
-        // 设置识别颜色（只在模式变化时设置）
-        if (current_mode != last_mode)
+        // 未收到裁判/电控数据时沿用 YAML detect_color；收到后由 mode 接管。
+        if (serial.hasReceivedData() && current_mode != last_mode)
         {
             if (current_mode == AUTO_AIM_RED)
             {
@@ -42,6 +43,10 @@ void armor_thread_func(std::shared_ptr<rigtorp::SPSCQueue<CameraFrame>> hikcamer
             {
                 detector.ArmorDetector_Set_Color(auto_aim::EnemyColor::BLUE);
                 MAS_LOG_WARN("ArmorDetector_Set_Color BLUE");
+            }
+            else
+            {
+                serial.disableVision();
             }
             last_mode = current_mode;
         }
@@ -62,11 +67,18 @@ void armor_thread_func(std::shared_ptr<rigtorp::SPSCQueue<CameraFrame>> hikcamer
                 hikcamerabuffer->pop();
                 if (!frame.frame.empty())
                 {
-                    // 检查四元数数据是否有效
-                    if (!serial.isQuaternionValid())
+                    // 检查四元数数据是否有效，并只记录状态变化，避免刷屏。
+                    const int64_t quaternion_age_ms = serial.quaternionAgeMs();
+                    const bool quaternion_valid = serial.isQuaternionValid();
+                    if (quaternion_valid != last_quaternion_valid)
+                    {
+                        MAS_LOG_WARN("Quaternion stream {} (age={} ms)", quaternion_valid ? "recovered" : "lost", quaternion_age_ms);
+                        last_quaternion_valid = quaternion_valid;
+                    }
+                    if (!quaternion_valid)
                     {
                         processed = true;  // 标记为已处理，避免频繁休眠
-                        serial.sendVision(0.0f, 0.0f, 0, 0);
+                        serial.disableVision();
                         continue;
                     }
                     
@@ -74,7 +86,8 @@ void armor_thread_func(std::shared_ptr<rigtorp::SPSCQueue<CameraFrame>> hikcamer
                     Eigen::Quaterniond pos    = serial.q(frame.timestamp);
                     tracker.armor_pose().set_R_gimbal2world(pos);
                     auto target = tracker.track(armors, frame.timestamp, "HikCamera_track", frame.frame);
-                    auto shoot_result = shooter.shoot(target, frame.timestamp, tracker.armor_pose().Get_R_gimbal2world(), frame.frame, "HikCamera_shoot");
+                    auto shoot_result = shooter.shoot(target, frame.timestamp, tracker.armor_pose().Get_R_gimbal2world(), frame.frame, "HikCamera_shoot",
+                                                      quaternion_age_ms, tracker.state() == "tracking");
                     serial.sendVision(shoot_result.target_yaw, shoot_result.target_pitch, shoot_result.found, shoot_result.fire_advice);
                     processed = true;
                 }

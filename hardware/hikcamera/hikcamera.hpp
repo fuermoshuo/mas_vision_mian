@@ -64,13 +64,11 @@ class HikCamera : public Base_Camera
     std::string       target_serial_;                   // 期望连接的设备序列号（空串表示不指定）
 
     bool  sdk_initialized_          = false;             // 全局 SDK 初始化状态标志
-    bool  wedge_detected_           = false;             // 锁卡死标志位，防止相机阻塞使锁长时间被占用  
     bool  was_connected_            = true;
     bool  was_stalled_              = false;
 
     int   consecutive_sdk_errors_   = 0;                 // 相机启动连续错误计数器
     int   pool_index                = 0;
-    int   wedge_consecutive_misses_ = 0;                 // 连续抢不到锁的次数（去抖计数器）
     int   reconnect_backoff_ms_     = kInitialBackoffMs; // 当前需要等待的退避间隔
 
     float exposure_actual_us_  = 0.0f;                  // 实际曝光时间（单位：微秒）
@@ -92,9 +90,6 @@ class HikCamera : public Base_Camera
     static constexpr int    kMaxConsecutiveSdkErrors = 5;     // captureLoop    错误计数累积阈值
     static constexpr int    kDaemonPollMs            = 100;   // daemonLoop     轮询间隔
     static constexpr int    kWatchdogTimeoutMs       = 1000;  // daemonLoop     超时阈值
-    static constexpr int    kWedgeEscalateMs         = 10000; // daemonLoop     日志升级等待时长
-    static constexpr int    kWedgeLogDebounceMisses  = 5;     // daemonLoop     抢锁失败日志触发阈值
-    static constexpr int    kWedgeLogThrottleMs      = 2000;  // daemonLoop     抢锁失败日志节流间隔  
     static constexpr size_t kQueueCapacity           = 2;     // pushFrame      帧队列容量，超出丢弃最旧帧
     static constexpr int    kQueueWaitMs             = 100;   // getImage       等待队列的超时时间
     static constexpr int    kCloseTeardownWarnMs     = 150;   // closeCamera    相机关闭耗时警告阈值
@@ -122,8 +117,6 @@ class HikCamera : public Base_Camera
     std::queue<CameraFrame> frame_queue_;
 
     std::chrono::steady_clock::time_point last_reconnect_attempt_{};  //上一次重连的时间
-    std::chrono::steady_clock::time_point wedge_since_           {};
-    std::chrono::steady_clock::time_point last_wedge_log_time_   {};
     std::chrono::steady_clock::time_point last_fail_log_time_    {};  // 上一次打印"重连失败"日志的时间，
     std::chrono::steady_clock::time_point last_drop_log_time_    {};  // 上一次打印丢帧日志的时间（节流用）
 

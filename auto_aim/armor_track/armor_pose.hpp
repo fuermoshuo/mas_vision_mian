@@ -36,8 +36,9 @@ class ArmorPose
     /**
      * @brief 获取装甲板的位姿
      * @param armor 装甲板对象
+     * @return PnP 解算和坐标转换是否成功
      */
-    void GetArmorPose(Armor &armor) const;
+    bool GetArmorPose(Armor &armor) const;
 
     /**
      * @brief 获取debug状态

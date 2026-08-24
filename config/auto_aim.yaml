@@ -1,6 +1,7 @@
 auto_aim:
   armor_detector:
     debug: false
+    plotter_enable: true       # 记录检测各阶段计数，不打开调试窗口
     binary_thres: 90
     detect_color: RED
     lights_params:
@@ -22,23 +23,32 @@ auto_aim:
   armor_track :
     armor_pose_debug: false
     armor_track_debug: false
+    plotter_enable: true       # 只记录跟踪诊断，不打开调试窗口
     min_detect_count: 5
     max_temp_lost_count: 25
     outpost_max_temp_lost_count: 75
+    max_z_innovation: 0.25       # 原始PnP与预测装甲板的最大高度差，单位：m
+    max_position_innovation: 0.8 # 原始PnP与预测装甲板的最大三维距离，单位：m
   armor_shoot:
-    debug: true
+    debug: false
     plotter_enable: true      # 是否启用 plotter 输出
     yaw_offset: 0.5           # 单位：度
     pitch_offset: 1.0         # 单位：度
     bullet_speed: 24.0        # 子弹初速度，单位：m/s
     gravity: 9.8              # 重力加速度，单位：m/s^2
     resistance: 0.0           # 空气阻力系数
-    hero_mode: false          # 英雄模式开关 
-    spinning_threshold_low: 2.0   # 低转速阈值，低于此直接跟板
-    spinning_threshold_high: 10.0 # 高转速阈值，高于此强制使用 hero_mode 逻辑
+    hero_mode: true           # false=步兵/哨兵连续跟板，true=英雄正面相位射击
+    spinning_threshold_low: 2.0   # 相位模式切入基准，实际带 ±0.4 rad/s 迟滞
+    fire_phase_angle: 20.0    # 预测装甲板允许开火的最大正面相位角，单位：度
+    recovery_done_error: 0.5  # 重捕平滑结束的最大指令误差，单位：度
+    switch_fire_hold_frames: 3 # 切换装甲板后的禁火帧数
+    max_yaw_speed: 12.0       # 重捕过渡最大 yaw 速度，单位：rad/s
+    max_pitch_speed: 8.0      # 重捕过渡最大 pitch 速度，单位：rad/s
+    max_yaw_acc: 50.0         # 重捕过渡最大 yaw 加速度，单位：rad/s^2
+    max_pitch_acc: 100.0      # 重捕过渡最大 pitch 加速度，单位：rad/s^2
     comming_angle: 60.0       # 小陀螺来向角阈值，单位：度
     leaving_angle: 30.0       # 小陀螺去向角阈值，单位：度
-    fire_delay_time: 0.002     # 统一发弹延迟，单位：s
+    fire_delay_time: 0.020     # 统一发弹延迟，单位：s
     yaw_tolerance_near: 2.0   # yaw射击容差（距离<3m），单位：度
     yaw_tolerance_far: 1.0    # yaw射击容差（距离>=3m），单位：度
     pitch_tolerance_near: 2.0 # pitch射击容差（距离<3m），单位：度

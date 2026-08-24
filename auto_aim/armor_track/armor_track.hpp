@@ -59,15 +59,29 @@ class ArmorTrack
     std::optional<Target> target_;
 
     // YAML 配置参数
-    bool                                  debug_;                       // debug开关
-    int                                   min_detect_count_;            // 最小检测次数
-    int                                   max_temp_lost_count_;         // 最大临时丢失次数
-    int                                   detect_count_;                // 当前检测次数
-    int                                   temp_lost_count_;             // 当前临时丢失次数
-    int                                   outpost_max_temp_lost_count_; // 前哨站最大丢失次数
-    int                                   normal_temp_lost_count_;      // 普通目标最大丢失次数
-    std::string                           state_, pre_state_;           // 当前/上一状态
-    std::chrono::steady_clock::time_point last_timestamp_;              // 上一帧时间戳
+    bool                                  debug_;                          // debug开关
+    bool                                  plotter_enable_;                 // UDP诊断记录开关
+    int                                   min_detect_count_;               // 最小检测次数
+    int                                   max_temp_lost_count_;            // 最大临时丢失次数
+    int                                   detect_count_;                   // 当前检测次数
+    int                                   temp_lost_count_;                // 当前临时丢失次数
+    int                                   outpost_max_temp_lost_count_;    // 前哨站最大丢失次数
+    int                                   normal_temp_lost_count_;         // 普通目标最大丢失次数
+    double                                max_z_innovation_        = 0.25; // PnP 与预测装甲板的最大高度差（m）
+    double                                max_position_innovation_ = 0.8;  // PnP 与预测装甲板的最大三维距离（m）
+    std::string                           state_, pre_state_;              // 当前/上一状态
+    std::chrono::steady_clock::time_point last_timestamp_;                 // 上一帧时间戳
+
+    Eigen::Vector3d                       raw_pnp_xyz_          = Eigen::Vector3d::Zero();   // 保存本帧原始 PnP 解算出来的世界坐标
+    bool                                  raw_pnp_valid_        = false;                     // 本帧原始 PnP 解算是否有效
+    bool                                  measurement_accepted_ = false;                     // 本帧 PnP 解算是否被 EKF 接受
+    int                                   matching_armor_count_ = 0;                         // 本帧匹配到目标编号和类型的装甲板数量
+    int                                   pnp_attempt_count_    = 0;                         // 本帧尝试 PnP 解算的次数
+    int                                   pnp_success_count_    = 0;                         // 本帧成功 PnP 解算的次数
+    double                                innovation_z_         = 0.0;                       // 本帧 PnP 与 EKF 预测的 z 方向新息
+    double                                innovation_norm_      = 0.0;                       // 本帧 PnP 与 EKF 预测的位移新息
+    std::string                           reject_reason_        = "none";                    // 本帧 PnP 解算被拒绝的原因
+    std::string                           reset_reason_         = "none";                    // 本帧 EKF 重置的原因
 
     /**
      * @brief 状态机处理
@@ -90,6 +104,8 @@ class ArmorTrack
      * @return 是否成功
      */
     bool update_target(std::vector<Armor> &armors, std::chrono::steady_clock::time_point t);
+
+    void plotDiagnostics(const std::vector<Armor> &armors, bool found, double dt, const std::string &state_before);
 
     // Debug相关
     mutable std::map<std::string, double>                                fps_map_;       // FPS计算

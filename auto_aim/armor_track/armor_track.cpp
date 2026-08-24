@@ -26,16 +26,20 @@ ArmorTrack::ArmorTrack(const std::string &track_config_path, const std::string &
       last_timestamp_(std::chrono::steady_clock::now())
 {
     debug_ = false;
+    plotter_enable_ = false;
 
     try
     {
         // 加载YAML配置文件
         YAML::Node config            = YAML::LoadFile(track_config_path);
         debug_                       = config["auto_aim"]["armor_track"]["armor_track_debug"].as<bool>(false);
+        plotter_enable_               = config["auto_aim"]["armor_track"]["plotter_enable"].as<bool>(false);
         min_detect_count_            = config["auto_aim"]["armor_track"]["min_detect_count"].as<int>(5);
         max_temp_lost_count_         = config["auto_aim"]["armor_track"]["max_temp_lost_count"].as<int>(3);
         outpost_max_temp_lost_count_ = config["auto_aim"]["armor_track"]["outpost_max_temp_lost_count"].as<int>(5);
         normal_temp_lost_count_      = max_temp_lost_count_;
+        max_z_innovation_            = config["auto_aim"]["armor_track"]["max_z_innovation"].as<double>(0.25);
+        max_position_innovation_     = config["auto_aim"]["armor_track"]["max_position_innovation"].as<double>(0.8);
 
         MAS_LOG_INFO("armor_track yaml loaded successfully");
     }
@@ -50,15 +54,42 @@ ArmorTrack::~ArmorTrack() {}
 std::optional<Target> ArmorTrack::track(std::vector<Armor> &armors, std::chrono::steady_clock::time_point t, std::string window_name,
                                         cv::Mat bgr_img) noexcept
 {
+    raw_pnp_xyz_.setZero();
+    raw_pnp_valid_        = false;
+    measurement_accepted_ = false;
+    matching_armor_count_ = 0;
+    pnp_attempt_count_    = 0;
+    pnp_success_count_    = 0;
+    innovation_z_         = 0.0;
+    innovation_norm_      = 0.0;
+    reject_reason_        = "none";
+    reset_reason_         = "none";
+    const std::string state_before = state_;
+    bool plot_emitted = false;
+
     // 计算时间间隔
-    auto dt         = rm_utils::delta_time(t, last_timestamp_);
+    auto dt = rm_utils::delta_time(t, last_timestamp_);
+
+    // 预防时间间隔为负或零的情况，可能是时间戳异常或系统时钟调整
+    if (dt <= 0.0)
+    {
+        reject_reason_ = "invalid_timestamp";
+        plotDiagnostics(armors, false, dt, state_before);
+        if ((state_ == "tracking" || state_ == "temp_lost") && target_.has_value()) return target_;
+        return std::nullopt;
+    }
+
     last_timestamp_ = t;
 
     // 时间间隔过长，说明可能发生了相机离线，重置状态
     if (state_ != "lost" && dt > 0.1)
     {
         MAS_LOG_WARN("Large dt: {}s", dt);
-        state_ = "lost";
+        state_           = "lost";
+        detect_count_    = 0;
+        temp_lost_count_ = 0;
+        target_.reset();
+        reset_reason_ = "large_dt";
     }
 
     // 先按优先级排序，同优先级按距离图像中心排序
@@ -93,9 +124,19 @@ std::optional<Target> ArmorTrack::track(std::vector<Armor> &armors, std::chrono:
         if (!armors.empty())
         {
             // 只解算需要用的装甲板
-            armor_pose_.GetArmorPose(armors[0]);
-            found = set_target(armors[0], t);
+            pnp_attempt_count_ = 1;
+            if (armor_pose_.GetArmorPose(armors[0]))
+            {
+                pnp_success_count_     = 1;
+                raw_pnp_xyz_          = armors[0].xyz_in_world;
+                raw_pnp_valid_        = true;
+                measurement_accepted_ = true;
+                found                 = set_target(armors[0], t);
+                reject_reason_        = "accepted";
+            }
+            else reject_reason_ = "pnp_failed";
         }
+        else reject_reason_ = "no_detection";
     }
     else
     {
@@ -105,11 +146,23 @@ std::optional<Target> ArmorTrack::track(std::vector<Armor> &armors, std::chrono:
 
     state_machine(found);
 
+    if (state_before == "detecting" && state_ == "lost" && !found)
+    {
+        reset_reason_ = "detecting_miss";
+    }
+    else if (state_before == "temp_lost" && state_ == "lost" && !found)
+    {
+        reset_reason_ = "temp_lost_timeout";
+    }
+
     // 发散检测：目标参数异常时重置
     if (state_ != "lost" && target_.has_value() && target_->diverged())
     {
         MAS_LOG_INFO("Target diverged!");
         state_ = "lost";
+        reset_reason_ = "radius_diverged";
+        plotDiagnostics(armors, found, dt, state_before);
+        plot_emitted = true;
         target_.reset();
     }
 
@@ -119,6 +172,9 @@ std::optional<Target> ArmorTrack::track(std::vector<Armor> &armors, std::chrono:
     {
         MAS_LOG_INFO("Bad Converge Found!");
         state_ = "lost";
+        reset_reason_ = "nis_bad_converge";
+        plotDiagnostics(armors, found, dt, state_before);
+        plot_emitted = true;
         target_.reset();
     }
 
@@ -126,38 +182,9 @@ std::optional<Target> ArmorTrack::track(std::vector<Armor> &armors, std::chrono:
     if (debug_)
     {
         showResult(armors, bgr_img, window_name);
-
-        // Plotter输出target数据
-        if (target_.has_value())
-        {
-            nlohmann::json plot_data;
-            plot_data["target_name"]  = target_->name;
-            plot_data["target_id"]    = target_->last_id;
-            plot_data["update_count"] = target_->update_count;
-            plot_data["state"]        = state_;
-            plot_data["armor_type"]   = (target_->armor_type == ArmorType::BIG) ? "BIG" : "SMALL";
-            plot_data["jumped"]       = target_->jumped;
-            plot_data["is_switch"]    = target_->is_switch;
-            plot_data["armor_num"]    = target_->armor_num;
-
-            if (target_->ekf().x.size() >= 11)
-            {
-                plot_data["x"]   = target_->ekf().x[0];
-                plot_data["vx"]  = target_->ekf().x[1];
-                plot_data["y"]   = target_->ekf().x[2];
-                plot_data["vy"]  = target_->ekf().x[3];
-                plot_data["z"]   = target_->ekf().x[4];
-                plot_data["vz"]  = target_->ekf().x[5];
-                plot_data["yaw"] = target_->ekf().x[6];
-                plot_data["w"]   = target_->ekf().x[7];
-                plot_data["r"]   = target_->ekf().x[8];
-                plot_data["l"]   = target_->ekf().x[9];
-                plot_data["h"]   = target_->ekf().x[10];
-            }
-
-            plotter_.plot(plot_data);
-        }
     }
+
+    if (!plot_emitted) plotDiagnostics(armors, found, dt, state_before);
 
     // 仅 tracking / temp_lost 状态下返回目标
     if ((state_ == "tracking" || state_ == "temp_lost") && target_.has_value()) return target_;
@@ -259,7 +286,7 @@ bool ArmorTrack::set_target(const Armor &armor, std::chrono::steady_clock::time_
     }
 
     // 使用 Target 构造函数创建目标
-    target_ = Target(armor, t, radius, armor_num, P0_dig);
+    target_ = Target(armor, t, radius, armor_num, P0_dig, max_z_innovation_, max_position_innovation_);
     return true;
 }
 
@@ -272,7 +299,11 @@ bool ArmorTrack::set_target(const Armor &armor, std::chrono::steady_clock::time_
  */
 bool ArmorTrack::update_target(std::vector<Armor> &armors, std::chrono::steady_clock::time_point t)
 {
-    if (!target_.has_value()) return false;
+    if (!target_.has_value())
+    {
+        reject_reason_ = "no_target";
+        return false;
+    }
 
     // EKF预测
     target_->predict(t);
@@ -284,19 +315,103 @@ bool ArmorTrack::update_target(std::vector<Armor> &armors, std::chrono::steady_c
         if (armor.number != target_->name || armor.type != target_->armor_type) continue;
         found_count++;
     }
+    matching_armor_count_ = found_count;
 
-    if (found_count == 0) return false;
+    if (found_count == 0)
+    {
+        reject_reason_ = armors.empty() ? "no_detection" : "target_mismatch";
+        return false;
+    }
 
-    // 对匹配的装甲板进行位姿解算并更新
+    // 防止在 armors 旋转时出现多块装甲板，检测一块接近的装甲板即可 
     for (auto &armor : armors)
     {
         if (armor.number != target_->name || armor.type != target_->armor_type) continue;
 
-        armor_pose_.GetArmorPose(armor);
-        target_->update(armor);
+        pnp_attempt_count_++;
+        if (!armor_pose_.GetArmorPose(armor)) continue;
+        pnp_success_count_++;
+
+        raw_pnp_xyz_   = armor.xyz_in_world;
+        raw_pnp_valid_ = true;
+        if (target_->update(armor))
+        {
+            innovation_z_         = target_->last_innovation_z();
+            innovation_norm_      = target_->last_innovation_norm();
+            measurement_accepted_ = true;
+            reject_reason_        = "accepted";
+            return true;
+        }
+
+        innovation_z_    = target_->last_innovation_z();
+        innovation_norm_ = target_->last_innovation_norm();
+        switch (target_->last_update_reject_reason())
+        {
+        case Target::UpdateRejectReason::NONFINITE:
+            reject_reason_ = "innovation_nonfinite";
+            break;
+        case Target::UpdateRejectReason::Z_INNOVATION:
+            reject_reason_ = "z_innovation";
+            break;
+        case Target::UpdateRejectReason::POSITION_INNOVATION:
+            reject_reason_ = "position_innovation";
+            break;
+        case Target::UpdateRejectReason::NONE:
+            break;
+        }
     }
 
-    return true;
+    if (pnp_success_count_ == 0) reject_reason_ = "pnp_failed";
+    return false;
+}
+
+void ArmorTrack::plotDiagnostics(const std::vector<Armor> &armors, bool found, double dt, const std::string &state_before)
+{
+    if (!plotter_enable_) return;
+
+    nlohmann::json data;
+    data["state"]                    = state_;
+    data["state_before"]             = state_before;
+    data["reject_reason"]            = reject_reason_;
+    data["reset_reason"]             = reset_reason_;
+    data["dt_ms"]                    = dt * 1000.0;
+    data["target_valid"]             = target_.has_value();
+    data["detected_armor_count"]     = armors.size();
+    data["matching_armor_count"]     = matching_armor_count_;
+    data["pnp_attempt_count"]        = pnp_attempt_count_;
+    data["pnp_success_count"]        = pnp_success_count_;
+    data["association_found"]        = found;
+    data["innovation_z"]             = innovation_z_;
+    data["innovation_norm"]          = innovation_norm_;
+    data["raw_pnp"]["valid"]       = raw_pnp_valid_;
+    data["raw_pnp"]["accepted"]    = measurement_accepted_;
+    data["raw_pnp"]["x"]           = raw_pnp_xyz_.x();
+    data["raw_pnp"]["y"]           = raw_pnp_xyz_.y();
+    data["raw_pnp"]["z"]           = raw_pnp_xyz_.z();
+
+    data["target_name"] = target_.has_value() ? target_->name : "none";
+    data["target_id"]   = target_.has_value() ? target_->last_id : -1;
+    data["armor_type"]  = target_.has_value() ? ((target_->armor_type == ArmorType::BIG) ? "BIG" : "SMALL") : "NONE";
+    data["update_count"] = target_.has_value() ? target_->update_count : 0;
+    data["jumped"]       = target_.has_value() && target_->jumped;
+    data["is_switch"]    = target_.has_value() && target_->is_switch;
+    data["armor_num"]    = target_.has_value() ? target_->armor_num : 0;
+
+    Eigen::VectorXd x;
+    if (target_.has_value()) x = target_->ekf_x();
+    data["x"]   = x.size() >= 11 ? x[0] : 0.0;
+    data["vx"]  = x.size() >= 11 ? x[1] : 0.0;
+    data["y"]   = x.size() >= 11 ? x[2] : 0.0;
+    data["vy"]  = x.size() >= 11 ? x[3] : 0.0;
+    data["z"]   = x.size() >= 11 ? x[4] : 0.0;
+    data["vz"]  = x.size() >= 11 ? x[5] : 0.0;
+    data["yaw"] = x.size() >= 11 ? x[6] : 0.0;
+    data["w"]   = x.size() >= 11 ? x[7] : 0.0;
+    data["r"]   = x.size() >= 11 ? x[8] : 0.0;
+    data["l"]   = x.size() >= 11 ? x[9] : 0.0;
+    data["h"]   = x.size() >= 11 ? x[10] : 0.0;
+
+    plotter_.plot(data);
 }
 
 void ArmorTrack::showResult(const std::vector<Armor> &armors, const cv::Mat &bgr_img, std::string window_name) const noexcept

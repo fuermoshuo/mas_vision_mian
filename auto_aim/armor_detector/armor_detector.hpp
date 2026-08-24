@@ -2,6 +2,7 @@
 #define _ARMOR_DETECTOR_H_
 
 #include <chrono>
+#include <cstddef>
 #include <map>
 #include <opencv2/core/mat.hpp>
 #include <string>
@@ -9,6 +10,7 @@
 #include "armor_types.hpp"
 #include "light_corner_corrector.hpp"
 #include "number_classifier.hpp"
+#include "plotter.hpp"
 
 namespace auto_aim
 {
@@ -74,14 +76,43 @@ class ArmorDetector
     std::vector<LightBar> lights_;
     std::vector<Armor>    armors_;
 
+    struct DetectionStats
+    {
+        std::size_t contour_count                 = 0;
+        std::size_t contour_too_small             = 0;
+        std::size_t light_reject_area             = 0;
+        std::size_t light_reject_angle            = 0;
+        std::size_t light_reject_ratio            = 0;
+        std::size_t light_reject_length           = 0;
+        std::size_t light_reject_color            = 0;
+        std::size_t geometry_light_count          = 0;
+        std::size_t color_light_count             = 0;
+        std::size_t armor_candidate_count         = 0;
+        std::size_t classifier_pass_count         = 0;
+        std::size_t classifier_model_error        = 0;
+        std::size_t classifier_low_confidence     = 0;
+        std::size_t classifier_negative_class     = 0;
+        std::size_t classifier_type_mismatch      = 0;
+        std::size_t classifier_evaluated_count    = 0;
+        std::size_t pair_reject_contain_light     = 0;
+        std::size_t pair_reject_ratio             = 0;
+        std::size_t pair_reject_side_ratio        = 0;
+        std::size_t pair_reject_rectangular_error = 0;
+        double      classifier_confidence_sum     = 0.0;
+        double      classifier_confidence_max     = 0.0;
+    } stats_;
+
     // 缓存图像，避免重复申请内存
     cv::Mat gray_;
     cv::Mat binary_;
 
     // yaml参数
     bool       debug_;
+    bool       plotter_enable_ = false;
     int        binary_thres_;
-    EnemyColor detect_color_ = EnemyColor::RED;
+
+    EnemyColor detect_color_  = EnemyColor::RED;
+
     double     min_lightbar_ratio_;
     double     max_lightbar_ratio_;
     double     min_lightbar_length_;
@@ -94,6 +125,8 @@ class ArmorDetector
 
     // 数字识别器
     std::unique_ptr<NumberClassifier> classifier;
+
+    rm_utils::Plotter plotter_;
 
     // 灯条角点优化器
     LightCornerCorrector light_corner_corrector_;

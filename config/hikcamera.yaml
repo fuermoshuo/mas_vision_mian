@@ -1,7 +1,7 @@
 camera:
   exposuretime: 6000.0
   gain: 16.0
-  transfer_latency_ms: 1.5  
+  transfer_latency_ms: 1.5  # 传输延迟（毫秒）
 calibration:
   pattern_cols: 10
   pattern_rows: 7

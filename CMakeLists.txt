@@ -29,6 +29,7 @@ add_executable(${PROJECT_NAME}
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/calibration/calibrate_camera.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/calibration/calibrate_handeye.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/apps/calibration/calibrate_latency.cpp
 )
 
 # 链接子模块库

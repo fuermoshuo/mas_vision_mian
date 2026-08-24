@@ -99,44 +99,13 @@ cv::Mat NumberClassifier::extractNumber(const cv::Mat &src, Armor &armor) const
     return number_image;
 }
 
-bool NumberClassifier::isIgnoreClass(const Armor &armor) const
-{
-    if (armor.confidence < threshold) // 检查置信度是否低于阈值
-    {
-        return true;
-    }
-
-    for (const auto &ignore_class : ignore_classes_) // 检查是否在忽略类别列表中
-    {
-        if (armor.number == ignore_class)
-        {
-            return true;
-        }
-    }
-
-    // 1号为大装甲板，其余都为小装甲板
-    if (armor.type == ArmorType::SMALL && armor.number == "1")
-    {
-        return true;
-    }
-    if (armor.type == ArmorType::BIG)
-    {
-        if (armor.number == "2" || armor.number == "3" || armor.number == "4" || armor.number == "5" || armor.number == "sentry" ||
-            armor.number == "outpost")
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-void NumberClassifier::classify(const cv::Mat &src, Armor &armor)
+NumberClassifier::RejectReason NumberClassifier::classify(const cv::Mat &src, Armor &armor)
 {
     if (!model_loaded_)
     {
         MAS_LOG_WARN("Model not loaded, cannot classify");
-        return;
+        armor.number = "negative";
+        return RejectReason::MODEL_NOT_LOADED;
     }
 
     cv::Mat number_img = extractNumber(src, armor);
@@ -161,12 +130,38 @@ void NumberClassifier::classify(const cv::Mat &src, Armor &armor)
     int label_id = class_id_point.x;
 
     armor.confidence = confidence;
-    armor.number     = class_names_[label_id];
-
-    if (isIgnoreClass(armor))
+    if (label_id < 0 || label_id >= static_cast<int>(class_names_.size()))
     {
         armor.number = "negative";
+        return RejectReason::MODEL_NOT_LOADED;
     }
+    armor.number = class_names_[label_id];
+
+    if (armor.confidence < threshold)
+    {
+        armor.number = "negative";
+        return RejectReason::LOW_CONFIDENCE;
+    }
+
+    for (const auto &ignore_class : ignore_classes_)
+    {
+        if (armor.number == ignore_class)
+        {
+            armor.number = "negative";
+            return RejectReason::NEGATIVE_CLASS;
+        }
+    }
+
+    // 1号为大装甲板，其余数字为小装甲板
+    if ((armor.type == ArmorType::SMALL && armor.number == "1") ||
+        (armor.type == ArmorType::BIG && (armor.number == "2" || armor.number == "3" || armor.number == "4" ||
+                                          armor.number == "5" || armor.number == "sentry" || armor.number == "outpost")))
+    {
+        armor.number = "negative";
+        return RejectReason::TYPE_MISMATCH;
+    }
+
+    return RejectReason::PASS;
 }
 
 } // namespace auto_aim

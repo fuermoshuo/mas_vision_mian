@@ -74,11 +74,11 @@ struct Armor
     float       confidence; // 置信度
     cv::Mat     number_img; // 用于存储提取出的数字图像
 
-    Eigen::Vector3d xyz_in_gimbal; // 单位：m
-    Eigen::Vector3d ypr_in_gimbal; // 单位：rad
-    Eigen::Vector3d xyz_in_world;  // 单位：m
-    Eigen::Vector3d ypr_in_world;  // 单位：rad
-    Eigen::Vector3d ypd_in_world;  // 球坐标系，单位：rad, m
+    Eigen::Vector3d xyz_in_gimbal = Eigen::Vector3d::Zero(); // 单位：m
+    Eigen::Vector3d ypr_in_gimbal = Eigen::Vector3d::Zero(); // 单位：rad
+    Eigen::Vector3d xyz_in_world  = Eigen::Vector3d::Zero(); // 单位：m
+    Eigen::Vector3d ypr_in_world  = Eigen::Vector3d::Zero(); // 单位：rad
+    Eigen::Vector3d ypd_in_world  = Eigen::Vector3d::Zero(); // 球坐标系，单位：rad, m
 
     double yaw_raw; // 原始 yaw 角度
 

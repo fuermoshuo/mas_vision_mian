@@ -19,6 +19,7 @@
 
 #include "calibrate_camera.hpp"
 #include "calibrate_handeye.hpp"
+#include "calibrate_latency.hpp"
 
 // 全局原子变量用于控制所有线程的生命周期
 std::atomic<bool> g_shutdown{false};
@@ -46,11 +47,16 @@ int main(int argc, char *argv[])
         {
             return calibration::calibrate_handeye_main();
         }
+        else if (command == "calibrate_latency")
+        {
+            return calibration::calibrate_latency_main();
+        }
         else
         {
             fmt::print("未知命令: {}\n", command);
             fmt::print("相机校准     : ./base calibrate_camera\n");
             fmt::print("手眼标定     : ./base calibrate_handeye\n");
+            fmt::print("传输延迟标定 : ./base calibrate_latency\n");
             return 1;
         }
     }

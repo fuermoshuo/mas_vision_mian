@@ -7,9 +7,9 @@ namespace rm_utils
 {
 struct Trajectory
 {
-    bool   unsolvable;
-    double fly_time;
-    double pitch; // 抬头为正
+    bool   unsolvable = true;
+    double fly_time   = 0.0;
+    double pitch      = 0.0; // 抬头为正
 
     // 不考虑空气阻力
     // v0 子弹初速度大小，单位：m/s

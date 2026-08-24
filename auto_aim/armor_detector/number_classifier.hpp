@@ -13,17 +13,24 @@ namespace auto_aim
 class NumberClassifier
 {
   public:
+    enum class RejectReason
+    {
+        PASS,
+        MODEL_NOT_LOADED,
+        LOW_CONFIDENCE,
+        NEGATIVE_CLASS,
+        TYPE_MISMATCH
+    };
+
     NumberClassifier(const std::string &model_path, const std::string &label_path, const double threshold,
                      const std::vector<std::string> &ignore_classes = {});
 
     // 数字识别接口
-    void classify(const cv::Mat &src, Armor &armor);
+    RejectReason classify(const cv::Mat &src, Armor &armor);
 
   private:
     cv::Mat extractNumber(const cv::Mat &src,
                           Armor         &armor) const;       // 从源图像中提取装甲板数字的 ROI 图像
-    bool    isIgnoreClass(const Armor &armor) const; // 检查是否是需要忽略的类别
-
     double                   threshold;       // 置信度阈值
     cv::dnn::Net             net_;            // ONNX 神经网络模型
     std::vector<std::string> class_names_;    // 类别名称列表

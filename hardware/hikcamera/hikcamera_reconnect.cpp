@@ -19,48 +19,6 @@ void hikcamera::HikCamera::daemonLoop()
             break;
         }
 
-        // ---- 第一部分：尝试抢锁，仅用于"采集线程是否卡在阻塞SDK调用里"的诊断日志，同时降低日志更新频率
-        {
-            std::unique_lock<std::timed_mutex> lock(camera_mutex_, std::chrono::milliseconds(kCameraFastLockTimeoutMs));
-            if (lock.owns_lock())
-            {
-                wedge_detected_           = false; // 抢到了锁，说明采集线程当前没有长期占锁，恢复正常，清除卡死计时
-                wedge_consecutive_misses_ = 0;      // 同时清零去抖计数器
-            }
-            else
-            {
-                auto now_steady = std::chrono::steady_clock::now();
-                ++wedge_consecutive_misses_;
-
-                if (!wedge_detected_ && wedge_consecutive_misses_ >= kWedgeLogDebounceMisses)
-                {
-                    wedge_detected_ = true;
-                    wedge_since_    = now_steady;
-
-                    auto since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               now_steady - last_wedge_log_time_)
-                                               .count();
-                    if (last_wedge_log_time_.time_since_epoch().count() == 0 || since_last_log >= kWedgeLogThrottleMs)
-                    {
-                        MAS_LOG_WARN("daemonLoop: camera_mutex_ busy for {} consecutive poll(s) (~{} ms, "
-                                     "diagnostic only, not treated as disconnect); capture thread likely "
-                                     "busy fetching a frame",
-                                     wedge_consecutive_misses_, wedge_consecutive_misses_ * kDaemonPollMs);
-                        last_wedge_log_time_ = now_steady;
-                    }
-                }
-                else if (wedge_detected_ &&
-                         std::chrono::duration_cast<std::chrono::milliseconds>(now_steady - wedge_since_).count() > kWedgeEscalateMs)
-                {
-                    MAS_LOG_ERROR("daemonLoop: camera_mutex_ has been busy for over {} ms continuously; "
-                                 "if this persists the capture thread may truly be wedged in a blocking SDK "
-                                 "call and in-process recovery may not be possible, consider restarting the process",
-                                 kWedgeEscalateMs);
-                    wedge_since_ = now_steady; // 避免刷屏，重新计时下一次升级提醒
-                }
-            }
-        }
-
         bool connected = isConnected.load(std::memory_order_relaxed);
 
         bool stalled = false;

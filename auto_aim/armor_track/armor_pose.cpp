@@ -1,5 +1,6 @@
 #include "armor_pose.hpp"
 
+#include <cmath>
 #include <exception>
 #include <fstream>
 
@@ -76,18 +77,24 @@ void ArmorPose::set_R_gimbal2world(const Eigen::Quaterniond &q)
     R_gimbal2world_                 = R_gimbal2imubody_.transpose() * R_imubody2world * R_gimbal2imubody_;
 }
 
-void ArmorPose::GetArmorPose(Armor &armor) const
+bool ArmorPose::GetArmorPose(Armor &armor) const
 {
     const auto &object_points = (armor.type == ArmorType::BIG) ? BIG_ARMOR_POINTS : SMALL_ARMOR_POINTS;
 
     // 使用 SOLVEPNP求解
     cv::Vec3d rvec, tvec;
-    cv::solvePnP(object_points, armor.points, camera_matrix_, distort_coeffs_, rvec, tvec, false, cv::SOLVEPNP_IPPE);
+    if (!cv::solvePnP(object_points, armor.points, camera_matrix_, distort_coeffs_, rvec, tvec, false, cv::SOLVEPNP_IPPE) ||
+        !std::isfinite(tvec[0]) || !std::isfinite(tvec[1]) || !std::isfinite(tvec[2]) || tvec[2] <= 0.0)
+    {
+        return false;
+    }
 
     Eigen::Vector3d xyz_in_camera;
     cv::cv2eigen(tvec, xyz_in_camera);
     armor.xyz_in_gimbal = R_camera2gimbal_ * xyz_in_camera + t_camera2gimbal_;
     armor.xyz_in_world  = R_gimbal2world_ * armor.xyz_in_gimbal;
+
+    if (!armor.xyz_in_gimbal.allFinite() || !armor.xyz_in_world.allFinite()) return false;
 
     cv::Mat rmat;
     cv::Rodrigues(rvec, rmat);
@@ -100,11 +107,15 @@ void ArmorPose::GetArmorPose(Armor &armor) const
     armor.ypr_in_world             = rm_utils::eulers(R_armor2world, 2, 1, 0);
     armor.ypd_in_world             = rm_utils::xyz2ypd(armor.xyz_in_world);
 
+    if (!armor.ypr_in_gimbal.allFinite() || !armor.ypr_in_world.allFinite() || !armor.ypd_in_world.allFinite()) return false;
+
     // 平衡不做yaw优化，因为pitch假设不成立
     auto is_balance = (armor.type == ArmorType::BIG) && (armor.number == "3" || armor.number == "4" || armor.number == "5");
-    if (is_balance) return;
+    if (is_balance) return true;
 
     optimize_yaw(armor);
+    return armor.ypr_in_world.allFinite();
+
 }
 
 void ArmorPose::optimize_yaw(Armor &armor) const
