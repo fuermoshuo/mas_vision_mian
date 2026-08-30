@@ -21,14 +21,26 @@ namespace
 // 单像素颜色差异门限
 constexpr int TARGET_COLOR_MARGIN = 20;
 
-constexpr bool matchesTargetColor(int diff_sum, int valid_count)
+enum class ColorMatch
 {
-    return valid_count > 0 && diff_sum > TARGET_COLOR_MARGIN * valid_count;
+    OPPOSITE,           // 我方 
+    NEUTRAL,            // 中性
+    TARGET,             // 敌方   
+};
+
+constexpr ColorMatch classifyTargetColor(int diff_sum, int valid_count)
+{
+    if (valid_count <= 0) return ColorMatch::NEUTRAL;
+    if (diff_sum < -TARGET_COLOR_MARGIN * valid_count) return ColorMatch::OPPOSITE;
+    if (diff_sum > TARGET_COLOR_MARGIN * valid_count) return ColorMatch::TARGET;
+    return ColorMatch::NEUTRAL;
 }
 
-static_assert(!matchesTargetColor(0, 27));
-static_assert(matchesTargetColor(21 * 27, 27));
-static_assert(!matchesTargetColor(-21 * 27, 27));
+// 断言提前编译
+static_assert(classifyTargetColor(0, 0) == ColorMatch::NEUTRAL);
+static_assert(classifyTargetColor(-21 * 27, 27) == ColorMatch::OPPOSITE);
+static_assert(classifyTargetColor(0, 27) == ColorMatch::NEUTRAL);
+static_assert(classifyTargetColor(21 * 27, 27) == ColorMatch::TARGET);
 } // namespace
 
 ArmorDetector::ArmorDetector(const std::string &config_path)
@@ -142,36 +154,36 @@ std::vector<Armor> ArmorDetector::ArmorDetect(const cv::Mat &bgr_img, std::strin
     if (plotter_enable_)
     {
         const char *stage = "detected";
-        if (stats_.contour_count == 0) stage = "no_contour";
-        else if (stats_.geometry_light_count == 0) stage = "light_geometry";
-        else if (stats_.color_light_count < 2) stage = "light_color_or_count";
+        if (stats_.contour_count == 0)              stage = "no_contour";
+        else if (stats_.geometry_light_count == 0)  stage = "light_geometry";
+        else if (stats_.color_light_count < 2)      stage = "light_color_or_count";
         else if (stats_.armor_candidate_count == 0) stage = "armor_pair";
         else if (stats_.classifier_pass_count == 0) stage = "classifier";
 
         nlohmann::json data;
-        data["detector"]["stage"]                 = stage;
-        data["detector"]["contour_count"]         = stats_.contour_count;
-        data["detector"]["contour_too_small"]     = stats_.contour_too_small;
-        data["detector"]["light_reject_area"]     = stats_.light_reject_area;
-        data["detector"]["light_reject_angle"]    = stats_.light_reject_angle;
-        data["detector"]["light_reject_ratio"]    = stats_.light_reject_ratio;
-        data["detector"]["light_reject_length"]   = stats_.light_reject_length;
-        data["detector"]["light_reject_color"]    = stats_.light_reject_color;
-        data["detector"]["geometry_light_count"]  = stats_.geometry_light_count;
-        data["detector"]["color_light_count"]     = stats_.color_light_count;
-        data["detector"]["armor_candidate_count"] = stats_.armor_candidate_count;
-        data["detector"]["classifier_pass_count"] = stats_.classifier_pass_count;
-        data["detector"]["classifier_model_error"] = stats_.classifier_model_error;
-        data["detector"]["classifier_low_confidence"] = stats_.classifier_low_confidence;
-        data["detector"]["classifier_negative_class"] = stats_.classifier_negative_class;
-        data["detector"]["classifier_type_mismatch"] = stats_.classifier_type_mismatch;
+        data["detector"]["stage"]                      = stage;
+        data["detector"]["contour_count"]              = stats_.contour_count;
+        data["detector"]["contour_too_small"]          = stats_.contour_too_small;
+        data["detector"]["light_reject_area"]          = stats_.light_reject_area;
+        data["detector"]["light_reject_angle"]         = stats_.light_reject_angle;
+        data["detector"]["light_reject_ratio"]         = stats_.light_reject_ratio;
+        data["detector"]["light_reject_length"]        = stats_.light_reject_length;
+        data["detector"]["light_reject_color"]         = stats_.light_reject_color;
+        data["detector"]["geometry_light_count"]       = stats_.geometry_light_count;
+        data["detector"]["color_light_count"]          = stats_.color_light_count;
+        data["detector"]["armor_candidate_count"]      = stats_.armor_candidate_count;
+        data["detector"]["classifier_pass_count"]      = stats_.classifier_pass_count;
+        data["detector"]["classifier_model_error"]     = stats_.classifier_model_error;
+        data["detector"]["classifier_low_confidence"]  = stats_.classifier_low_confidence;
+        data["detector"]["classifier_negative_class"]  = stats_.classifier_negative_class;
+        data["detector"]["classifier_type_mismatch"]   = stats_.classifier_type_mismatch;
         data["detector"]["classifier_confidence_mean"] = stats_.classifier_evaluated_count == 0
                                                                ? 0.0
                                                                : stats_.classifier_confidence_sum / stats_.classifier_evaluated_count;
-        data["detector"]["classifier_confidence_max"] = stats_.classifier_confidence_max;
-        data["detector"]["pair_reject_contain_light"] = stats_.pair_reject_contain_light;
-        data["detector"]["pair_reject_ratio"] = stats_.pair_reject_ratio;
-        data["detector"]["pair_reject_side_ratio"] = stats_.pair_reject_side_ratio;
+        data["detector"]["classifier_confidence_max"]     = stats_.classifier_confidence_max;
+        data["detector"]["pair_reject_contain_light"]     = stats_.pair_reject_contain_light;
+        data["detector"]["pair_reject_ratio"]             = stats_.pair_reject_ratio;
+        data["detector"]["pair_reject_side_ratio"]        = stats_.pair_reject_side_ratio;
         data["detector"]["pair_reject_rectangular_error"] = stats_.pair_reject_rectangular_error;
         plotter_.plot(data);
     }
@@ -247,7 +259,7 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
             const bool     is_red    = (detect_color_ == EnemyColor::RED);
 
             constexpr int  N_LENGTH_SAMPLES = 10;
-            constexpr int  N_WIDTH_SAMPLES  = 3;
+            constexpr int  N_WIDTH_SAMPLES  = 5;
             cv::Point2f    axis             = lightbar.bottom - lightbar.top;
             const float    axis_length      = cv::norm(axis);
             if (axis_length < 1e-3f)
@@ -265,24 +277,30 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
                 const cv::Point2f center = lightbar.top + (lightbar.bottom - lightbar.top) * length_ratio;
                 for (int j = 0; j < N_WIDTH_SAMPLES; ++j)
                 {
-                    const float width_ratio = (static_cast<float>(j) - 1.0f) / 2.0f;
-                    const cv::Point2f pt = center + perpendicular * static_cast<float>(lightbar.width * width_ratio * 0.5);
+                    // 覆盖灯条核心及两侧光晕，避免只采到过曝白芯。
+                    const float width_ratio = (static_cast<float>(j) - 2.0f) / 2.0f;
+                    const cv::Point2f pt = center + perpendicular * static_cast<float>(lightbar.width * width_ratio * 0.75);
                     const int px = static_cast<int>(pt.x);
                     const int py = static_cast<int>(pt.y);
                     if (px < 0 || px >= cols || py < 0 || py >= rows) continue;
 
                     const uint8_t *pixel = pixel_ptr + py * stride + px * 3;
-                    diff_sum += is_red ? (pixel[2] - pixel[0]) : (pixel[0] - pixel[2]);
+                    const int brightness = std::max({static_cast<int>(pixel[0]), static_cast<int>(pixel[1]), static_cast<int>(pixel[2])});
+                    const int color_diff = is_red ? (pixel[2] - pixel[0]) : (pixel[0] - pixel[2]);
+                    // 暗部噪声和白色饱和点都不携带可靠红蓝信息。
+                    if (brightness < 40 || (color_diff >= -TARGET_COLOR_MARGIN && color_diff <= TARGET_COLOR_MARGIN)) continue;
+                    diff_sum += color_diff;
                     valid_count++;
                 }
             }
 
-            // 必须明确偏向目标颜色；运动模糊或过曝形成的中性白光不能用于敌我判断。
-            if (!matchesTargetColor(diff_sum, valid_count))
+            const ColorMatch color_match = classifyTargetColor(diff_sum, valid_count);
+            if (color_match == ColorMatch::OPPOSITE)
             {
                 stats_.light_reject_color++;
                 continue;
             }
+            lightbar.target_color_confirmed = color_match == ColorMatch::TARGET;
             lightbar.color = is_red ? EnemyColor::RED : EnemyColor::BLUE;
         }
 
@@ -307,6 +325,11 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
         for (auto right = left + 1; right != lights.end(); right++)
         {
             if (left->color != right->color) continue;
+            // 中性灯条可以补全一根过曝灯条，但两根都无法确认颜色时不能组成装甲板。
+            if (!left->target_color_confirmed && !right->target_color_confirmed)
+            {
+                continue;
+            }
             // 检查是否存在共用灯条的情况
             if (containLight(left - lights.begin(), right - lights.begin(), lights))
             {
@@ -346,7 +369,7 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
             candidates.emplace_back(armor);
         }
     }
-    
+
     stats_.armor_candidate_count = candidates.size();
 
     for (auto &armor : candidates)

@@ -28,7 +28,8 @@ const char *const ARMOR_PRIORITIES[] = {"1", "2", "3", "4", "5", "sentry","outpo
 
 struct LightBar
 {
-    EnemyColor               color;                                    // 灯条颜色
+    EnemyColor               color                  = PURPLE;          // 灯条颜色
+    bool                     target_color_confirmed = false;           // 是否明确偏向当前敌方装甲板颜色
     cv::Point2f              center, top, bottom, top2bottom;          // 灯条中心、上顶点、下顶点、上顶点到下顶点的距离
     std::vector<cv::Point2f> points;                                   // 灯条顶点
     double                   angle, angle_error, length, width, ratio; // 灯条角度、角度误差、长度、宽度、宽高比

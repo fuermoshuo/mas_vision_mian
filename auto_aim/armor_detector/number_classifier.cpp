@@ -90,7 +90,7 @@ cv::Mat NumberClassifier::extractNumber(const cv::Mat &src, Armor &armor) const
     number_image = number_image(cv::Rect(cv::Point(roi_x, 0), roi_size));
 
     // 预处理：灰度化 + 二值化 + 尺寸调整
-    cv::cvtColor(number_image, number_image, cv::COLOR_RGB2GRAY);
+    cv::cvtColor(number_image, number_image, cv::COLOR_BGR2GRAY);
     cv::threshold(number_image, number_image, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
 
     // 最终调整为模型输入尺寸 (例如 28x28)
