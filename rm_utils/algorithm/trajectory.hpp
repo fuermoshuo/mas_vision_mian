@@ -50,7 +50,7 @@ struct Trajectory
      * @param gravity 重力加速度，单位：m/s²
      * @param air_resistance 二次空气阻力系数，单位：1/m
      */
-    Trajectory(double v0, double d, double h, double gravity = 9.81, double air_resistance = 0.003);
+    Trajectory(double v0, double d, double h, double gravity = 9.81, double air_resistance = 0.0092);
 };
 
 } // namespace rm_utils
