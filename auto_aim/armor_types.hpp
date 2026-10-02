@@ -34,6 +34,7 @@ struct LightBar
     std::vector<cv::Point2f> points;                                   // 灯条顶点
     double                   angle, angle_error, length, width, ratio; // 灯条角度、角度误差、长度、宽度、宽高比
     cv::RotatedRect          rotated_rect;                             // 灯条旋转矩形
+    int                      source_id              = -1;              // 灯条编号，findLights 排序后按序赋值，用于定位被拒候选
 
     LightBar() = default;
 
