@@ -46,7 +46,6 @@ class ArmorDetector
      * @brief 显示识别结果，仅在debug下有效
      * @param bgr_img 输入图像
      * @param window_name 窗口名称
-     * @return *
      */
     void showResult(const cv::Mat &bgr_img, const cv::Mat &bin_img, std::string window_name = "") const;
 
@@ -55,13 +54,6 @@ class ArmorDetector
      * @return 拼接后的数字图像，如果没有识别到则返回黑色图像
      */
     cv::Mat getAllNumbersImage() const noexcept;
-
-    /**
-     * @brief 对灯条的角点进行优化
-     * @param lightbar 灯条
-     * @param gray_img 灰度图像
-     */
-    void lightbar_points_corrector(LightBar &lightbar, const cv::Mat &gray_img) const;
 
     /**
      * @brief 检查灯条是否存在共用灯条的情况
@@ -76,6 +68,7 @@ class ArmorDetector
     std::vector<LightBar> lights_;
     std::vector<Armor>    armors_;
 
+    // 统计detect信息
     struct DetectionStats
     {
         std::size_t contour_count                 = 0;
@@ -98,8 +91,30 @@ class ArmorDetector
         std::size_t pair_reject_ratio             = 0;
         std::size_t pair_reject_side_ratio        = 0;
         std::size_t pair_reject_rectangular_error = 0;
-        double      classifier_confidence_sum     = 0.0;
-        double      classifier_confidence_max     = 0.0;
+        std::size_t corner_sample_count           = 0;
+
+        bool        reject_candidate_valid             = false;
+        bool        reject_candidate_classifier        = false;
+        bool        reject_candidate_contain_light     = false;
+        int         reject_candidate_failed_gates      = 0;
+        int         reject_candidate_left_source_id    = -1;
+        int         reject_candidate_right_source_id   = -1;
+        double      reject_candidate_distance          = 0.0;
+        double      reject_candidate_ratio             = 0.0;
+        double      reject_candidate_side_ratio        = 0.0;
+        double      reject_candidate_rectangular_error = 0.0;
+        double      reject_candidate_confidence        = 0.0;
+
+        std::string reject_candidate_reason     = "none";
+        std::string reject_candidate_class_name = "";
+
+        double      classifier_confidence_sum               = 0.0;
+        double      classifier_confidence_max               = 0.0;
+        double      corner_raw_lightbar_length_sum          = 0.0;
+        double      corner_corrected_lightbar_length_sum    = 0.0;
+        double      corner_length_scale_sum                 = 0.0;
+        double      corner_raw_width_height_ratio_sum       = 0.0;
+        double      corner_corrected_width_height_ratio_sum = 0.0;
     } stats_;
 
     // 缓存图像，避免重复申请内存
@@ -113,15 +128,15 @@ class ArmorDetector
 
     EnemyColor detect_color_  = EnemyColor::RED;
 
-    double     min_lightbar_ratio_;
-    double     max_lightbar_ratio_;
-    double     min_lightbar_length_;
-    double     max_angle_error_;
-    double     max_lightbar_area_;
-    double     min_armor_ratio_;
-    double     max_armor_ratio_;
-    double     max_side_ratio_;
-    double     max_rectangular_error_;
+    double min_lightbar_ratio_;
+    double max_lightbar_ratio_;
+    double min_lightbar_length_;
+    double max_angle_error_;
+    double max_lightbar_area_;
+    double min_armor_ratio_;
+    double max_armor_ratio_;
+    double max_side_ratio_;
+    double max_rectangular_error_;
 
     // 数字识别器
     std::unique_ptr<NumberClassifier> classifier;

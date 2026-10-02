@@ -139,7 +139,6 @@ NumberClassifier::RejectReason NumberClassifier::classify(const cv::Mat &src, Ar
 
     if (armor.confidence < threshold)
     {
-        armor.number = "negative";
         return RejectReason::LOW_CONFIDENCE;
     }
 
@@ -147,7 +146,6 @@ NumberClassifier::RejectReason NumberClassifier::classify(const cv::Mat &src, Ar
     {
         if (armor.number == ignore_class)
         {
-            armor.number = "negative";
             return RejectReason::NEGATIVE_CLASS;
         }
     }
@@ -157,7 +155,6 @@ NumberClassifier::RejectReason NumberClassifier::classify(const cv::Mat &src, Ar
         (armor.type == ArmorType::BIG && (armor.number == "2" || armor.number == "3" || armor.number == "4" ||
                                           armor.number == "5" || armor.number == "sentry" || armor.number == "outpost")))
     {
-        armor.number = "negative";
         return RejectReason::TYPE_MISMATCH;
     }
 

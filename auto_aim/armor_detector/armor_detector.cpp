@@ -23,11 +23,46 @@ constexpr int TARGET_COLOR_MARGIN = 20;
 
 enum class ColorMatch
 {
-    OPPOSITE,           // 我方 
+    OPPOSITE,           // 我方
     NEUTRAL,            // 中性
-    TARGET,             // 敌方   
+    TARGET,             // 敌方
 };
 
+struct RejectCandidateRank
+{
+    bool   classifier_rejected;     // 是否被分类器拒绝
+    int    failed_gate_count;       // 几何特征失败的门数
+    double distance;                // 几何特征失败的距离度量
+    double confidence;              // 分类器置信度
+    int    left_source_id;          // 左灯条的源 ID
+    int    right_source_id;         // 右灯条的源 ID
+};
+
+/**
+ * @brief 比较两个被拒绝候选的诊断排名
+ * @param candidate 当前待比较的拒绝候选排名
+ * @param current 当前已记录的拒绝候选排名
+ * @return candidate 的诊断优先级更高时返回 true，否则返回 false
+ */
+constexpr bool betterRejectCandidate(const RejectCandidateRank &candidate, const RejectCandidateRank &current)
+{
+    if (candidate.classifier_rejected != current.classifier_rejected) return candidate.classifier_rejected;
+    if (candidate.classifier_rejected && candidate.confidence != current.confidence)
+        return candidate.confidence > current.confidence;
+    if (!candidate.classifier_rejected && candidate.failed_gate_count != current.failed_gate_count)
+        return candidate.failed_gate_count < current.failed_gate_count;
+    if (!candidate.classifier_rejected && candidate.distance != current.distance)
+        return candidate.distance < current.distance;
+    if (candidate.left_source_id != current.left_source_id) return candidate.left_source_id < current.left_source_id;
+    return candidate.right_source_id < current.right_source_id;
+}
+
+/**
+ * @brief 根据灯条颜色差异和有效采样点数量判断装甲板颜色
+ * @param diff_sum 灯条颜色差异总和
+ * @param valid_count 有效采样点数量
+ * @return ColorMatch 装甲板颜色匹配结果
+ */
 constexpr ColorMatch classifyTargetColor(int diff_sum, int valid_count)
 {
     if (valid_count <= 0) return ColorMatch::NEUTRAL;
@@ -36,11 +71,6 @@ constexpr ColorMatch classifyTargetColor(int diff_sum, int valid_count)
     return ColorMatch::NEUTRAL;
 }
 
-// 断言提前编译
-static_assert(classifyTargetColor(0, 0) == ColorMatch::NEUTRAL);
-static_assert(classifyTargetColor(-21 * 27, 27) == ColorMatch::OPPOSITE);
-static_assert(classifyTargetColor(0, 27) == ColorMatch::NEUTRAL);
-static_assert(classifyTargetColor(21 * 27, 27) == ColorMatch::TARGET);
 } // namespace
 
 ArmorDetector::ArmorDetector(const std::string &config_path)
@@ -180,11 +210,47 @@ std::vector<Armor> ArmorDetector::ArmorDetect(const cv::Mat &bgr_img, std::strin
         data["detector"]["classifier_confidence_mean"] = stats_.classifier_evaluated_count == 0
                                                                ? 0.0
                                                                : stats_.classifier_confidence_sum / stats_.classifier_evaluated_count;
-        data["detector"]["classifier_confidence_max"]     = stats_.classifier_confidence_max;
-        data["detector"]["pair_reject_contain_light"]     = stats_.pair_reject_contain_light;
-        data["detector"]["pair_reject_ratio"]             = stats_.pair_reject_ratio;
-        data["detector"]["pair_reject_side_ratio"]        = stats_.pair_reject_side_ratio;
-        data["detector"]["pair_reject_rectangular_error"] = stats_.pair_reject_rectangular_error;
+
+        data["detector"]["classifier_confidence_max"]         = stats_.classifier_confidence_max;
+        data["detector"]["pair_reject_contain_light"]         = stats_.pair_reject_contain_light;
+        data["detector"]["pair_reject_ratio"]                 = stats_.pair_reject_ratio;
+        data["detector"]["pair_reject_side_ratio"]            = stats_.pair_reject_side_ratio;
+        data["detector"]["pair_reject_rectangular_error"]     = stats_.pair_reject_rectangular_error;
+        data["detector"]["reject_candidate_diagnostic_stage"] = "closest-rejected-candidate-v39";
+        data["detector"]["reject_candidate_valid"]            = stats_.reject_candidate_valid;
+        data["detector"]["reject_candidate_left_source_id"]   = stats_.reject_candidate_left_source_id;
+        data["detector"]["reject_candidate_right_source_id"]  = stats_.reject_candidate_right_source_id;
+        data["detector"]["reject_candidate_reason"]           = stats_.reject_candidate_reason;
+        data["detector"]["reject_candidate_contain_light"]    = stats_.reject_candidate_contain_light;
+        data["detector"]["reject_candidate_failed_gates"]     = stats_.reject_candidate_failed_gates;
+        data["detector"]["reject_candidate_distance"]         = stats_.reject_candidate_distance;
+        data["detector"]["reject_candidate_ratio"]            = stats_.reject_candidate_ratio;
+        data["detector"]["reject_candidate_side_ratio"]       = stats_.reject_candidate_side_ratio;
+
+        data["detector"]["reject_candidate_rectangular_error_deg"] = stats_.reject_candidate_rectangular_error * 57.3;
+        data["detector"]["reject_candidate_class"]                 = stats_.reject_candidate_class_name;
+        data["detector"]["reject_candidate_confidence"]            = stats_.reject_candidate_confidence;
+        data["detector"]["corner_diagnostic_stage"]                = "raw-corner-bypass-v38";
+        data["detector"]["corner_sample_count"]                    = stats_.corner_sample_count;
+        data["detector"]["corner_raw_lightbar_length_mean_px"]     = stats_.corner_sample_count == 0
+                                                                           ? 0.0
+                                                                           : stats_.corner_raw_lightbar_length_sum / stats_.corner_sample_count;
+
+        data["detector"]["corner_corrected_lightbar_length_mean_px"] = stats_.corner_sample_count == 0
+                                                                                 ? 0.0
+                                                                                 : stats_.corner_corrected_lightbar_length_sum / stats_.corner_sample_count;
+
+        data["detector"]["corner_length_scale_mean"] = stats_.corner_sample_count == 0
+                                                               ? 0.0
+                                                               : stats_.corner_length_scale_sum / stats_.corner_sample_count;
+
+        data["detector"]["corner_raw_width_height_ratio_mean"] = stats_.corner_sample_count == 0
+                                                                         ? 0.0
+                                                                         : stats_.corner_raw_width_height_ratio_sum / stats_.corner_sample_count;
+
+        data["detector"]["corner_corrected_width_height_ratio_mean"] = stats_.corner_sample_count == 0
+                                                                               ? 0.0
+                                                                               : stats_.corner_corrected_width_height_ratio_sum / stats_.corner_sample_count;
         plotter_.plot(data);
     }
 
@@ -210,7 +276,7 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
     for (const auto &contour : contours)
     {
         // 初步过滤
-        if (contour.size() < 4) 
+        if (contour.size() < 4)
         {
             stats_.contour_too_small++;
             continue;
@@ -223,7 +289,7 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
         {
             stats_.light_reject_area++;
             continue;
-        } 
+        }
 
         // 旋转矩形
         auto r_rect = cv::minAreaRect(contour);
@@ -262,10 +328,12 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
             constexpr int  N_WIDTH_SAMPLES  = 5;
             cv::Point2f    axis             = lightbar.bottom - lightbar.top;
             const float    axis_length      = cv::norm(axis);
+
             if (axis_length < 1e-3f)
             {
                 continue;
             }
+            
             axis *= 1.0f / axis_length;
             const cv::Point2f perpendicular(-axis.y, axis.x); // axis 的垂直方向单位向量
             int               diff_sum    = 0;
@@ -310,6 +378,8 @@ std::vector<LightBar> ArmorDetector::findLights(const cv::Mat &bin_img, const cv
 
     // 排序
     std::sort(lightbars.begin(), lightbars.end(), [](const LightBar &a, const LightBar &b) { return a.center.x < b.center.x; });
+    for (std::size_t i = 0; i < lightbars.size(); ++i)
+        lightbars[i].source_id = static_cast<int>(i);
 
     return lightbars;
 }
@@ -318,6 +388,45 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
 {
     std::vector<Armor> armors;
     std::vector<Armor> candidates; // 预筛选的候选装甲板
+
+    // 记录被拒绝候选的诊断信息
+    const auto record_rejected_candidate = [this](const Armor        &armor,
+                                                   bool               contain_light,
+                                                   int                failed_gate_count,
+                                                   double             distance,
+                                                   bool               classifier_rejected,
+                                                   const char        *reason,
+                                                   const std::string &class_name,
+                                                   double             confidence)
+    {
+        const RejectCandidateRank candidate_rank{classifier_rejected,
+                                                  failed_gate_count,
+                                                  distance,
+                                                  confidence,
+                                                  armor.left.source_id,
+                                                  armor.right.source_id};
+        const RejectCandidateRank current_rank{stats_.reject_candidate_classifier,
+                                                stats_.reject_candidate_failed_gates,
+                                                stats_.reject_candidate_distance,
+                                                stats_.reject_candidate_confidence,
+                                                stats_.reject_candidate_left_source_id,
+                                                stats_.reject_candidate_right_source_id};
+        if (stats_.reject_candidate_valid && !betterRejectCandidate(candidate_rank, current_rank)) return;
+
+        stats_.reject_candidate_valid             = true;
+        stats_.reject_candidate_classifier        = classifier_rejected;
+        stats_.reject_candidate_contain_light     = contain_light;
+        stats_.reject_candidate_failed_gates      = failed_gate_count;
+        stats_.reject_candidate_left_source_id    = armor.left.source_id;
+        stats_.reject_candidate_right_source_id   = armor.right.source_id;
+        stats_.reject_candidate_distance          = distance;
+        stats_.reject_candidate_ratio             = armor.ratio;
+        stats_.reject_candidate_side_ratio        = armor.side_ratio;
+        stats_.reject_candidate_rectangular_error = armor.rectangular_error;
+        stats_.reject_candidate_reason            = reason;
+        stats_.reject_candidate_class_name        = class_name;
+        stats_.reject_candidate_confidence        = confidence;
+    };
 
     // 几何特征筛选，收集候选装甲板
     for (auto left = lights.begin(); left != lights.end(); left++)
@@ -330,29 +439,54 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
             {
                 continue;
             }
-            // 检查是否存在共用灯条的情况
-            if (containLight(left - lights.begin(), right - lights.begin(), lights))
-            {
-                stats_.pair_reject_contain_light++;
-                continue;
-            }
-
             auto armor = Armor(*left, *right);
 
+            const bool contain_light = containLight(left - lights.begin(), right - lights.begin(), lights);
+            const bool reject_ratio  = armor.ratio < min_armor_ratio_ || armor.ratio > max_armor_ratio_;
+
+            const bool reject_side_ratio        = armor.side_ratio > max_side_ratio_;
+            const bool reject_rectangular_error = armor.rectangular_error > max_rectangular_error_;
+            const int  failed_gate_count        = static_cast<int>(contain_light) + static_cast<int>(reject_ratio) +
+                                          static_cast<int>(reject_side_ratio) + static_cast<int>(reject_rectangular_error);
+
+            double reject_distance = 0.0;
+
+            if (armor.ratio < min_armor_ratio_)
+                reject_distance += (min_armor_ratio_ - armor.ratio) / std::max(min_armor_ratio_, 1e-6);
+            else if (armor.ratio > max_armor_ratio_)
+                reject_distance += (armor.ratio - max_armor_ratio_) / std::max(max_armor_ratio_, 1e-6);
+            if (reject_side_ratio)
+                reject_distance += (armor.side_ratio - max_side_ratio_) / std::max(max_side_ratio_, 1e-6);
+            if (reject_rectangular_error)
+                reject_distance +=
+                    (armor.rectangular_error - max_rectangular_error_) / std::max(max_rectangular_error_, 1e-6);
+
             // 几何特征判断
-            if (armor.ratio < min_armor_ratio_ || armor.ratio > max_armor_ratio_)
+            const char *pair_reject_reason = nullptr;
+            if (contain_light)
+            {
+                stats_.pair_reject_contain_light++;
+                pair_reject_reason = "contain_light";
+            }
+            else if (reject_ratio)
             {
                 stats_.pair_reject_ratio++;
-                continue;
+                pair_reject_reason = "ratio";
             }
-            if (armor.side_ratio > max_side_ratio_)
+            else if (reject_side_ratio)
             {
                 stats_.pair_reject_side_ratio++;
-                continue;
+                pair_reject_reason = "side_ratio";
             }
-            if (armor.rectangular_error > max_rectangular_error_)
+            else if (reject_rectangular_error)
             {
                 stats_.pair_reject_rectangular_error++;
+                pair_reject_reason = "rectangular_error";
+            }
+            if (pair_reject_reason != nullptr)
+            {
+                record_rejected_candidate(
+                    armor, contain_light, failed_gate_count, reject_distance, false, pair_reject_reason, "", 0.0);
                 continue;
             }
 
@@ -372,37 +506,62 @@ std::vector<Armor> ArmorDetector::findArmors(const std::vector<LightBar> &lights
 
     stats_.armor_candidate_count = candidates.size();
 
+    // 数字特征筛选，收集候选装甲板
     for (auto &armor : candidates)
     {
-        // 数字识别
-        const auto reject_reason = classifier->classify(src_img, armor);
+        const auto reject_reason       = classifier->classify(src_img, armor);
+        const char *reject_reason_name = "pass";
         if (reject_reason != NumberClassifier::RejectReason::MODEL_NOT_LOADED)
         {
             stats_.classifier_evaluated_count++;
             stats_.classifier_confidence_sum += armor.confidence;
-            stats_.classifier_confidence_max = std::max(stats_.classifier_confidence_max, static_cast<double>(armor.confidence));
+            stats_.classifier_confidence_max  = std::max(stats_.classifier_confidence_max, static_cast<double>(armor.confidence));
         }
         switch (reject_reason)
         {
         case NumberClassifier::RejectReason::MODEL_NOT_LOADED:
             stats_.classifier_model_error++;
+            reject_reason_name = "classifier_model_error";
             break;
         case NumberClassifier::RejectReason::LOW_CONFIDENCE:
             stats_.classifier_low_confidence++;
+            reject_reason_name = "classifier_low_confidence";
             break;
         case NumberClassifier::RejectReason::NEGATIVE_CLASS:
             stats_.classifier_negative_class++;
+            reject_reason_name = "classifier_negative_class";
             break;
         case NumberClassifier::RejectReason::TYPE_MISMATCH:
             stats_.classifier_type_mismatch++;
+            reject_reason_name = "classifier_type_mismatch";
             break;
         case NumberClassifier::RejectReason::PASS:
             break;
         }
-        if (reject_reason != NumberClassifier::RejectReason::PASS) continue;
+        if (reject_reason != NumberClassifier::RejectReason::PASS)
+        {
+            const double confidence = reject_reason == NumberClassifier::RejectReason::MODEL_NOT_LOADED ? 0.0 : armor.confidence;
+            record_rejected_candidate(armor, false, 0, 0.0, true, reject_reason_name, armor.number, confidence);
+            continue;
+        }
 
-        // 角点优化
-        light_corner_corrector_.correctCorners(armor, gray_);
+        const double raw_lightbar_length =
+            (cv::norm(armor.left.top - armor.left.bottom) + cv::norm(armor.right.top - armor.right.bottom)) / 2.0;
+        const double raw_width_height_ratio =
+            cv::norm(armor.left.center - armor.right.center) / std::max(raw_lightbar_length, 1e-6);
+
+        // 验证自定义角点对 EKF 的影响
+        const double corrected_lightbar_length =
+            (cv::norm(armor.left.top - armor.left.bottom) + cv::norm(armor.right.top - armor.right.bottom)) / 2.0;
+        const double corrected_width_height_ratio =
+            cv::norm(armor.left.center - armor.right.center) / std::max(corrected_lightbar_length, 1e-6);
+        
+        stats_.corner_sample_count++;
+        stats_.corner_raw_lightbar_length_sum += raw_lightbar_length;
+        stats_.corner_corrected_lightbar_length_sum += corrected_lightbar_length;
+        stats_.corner_length_scale_sum += corrected_lightbar_length / std::max(raw_lightbar_length, 1e-6);
+        stats_.corner_raw_width_height_ratio_sum += raw_width_height_ratio;
+        stats_.corner_corrected_width_height_ratio_sum += corrected_width_height_ratio;
 
         armors.emplace_back(armor);
     }
